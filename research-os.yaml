@@ -1,0 +1,18 @@
+version: "0.1.0"
+name: "research-intelligence-os"
+type: "runtime-layer"
+description: "Reusable contracts, templates, and execution layer for research intelligence systems"
+
+contracts:
+  - pipeline-contract.md
+  - agent-contract.md
+  - evaluation-contract.md
+
+templates:
+  - research-agent.agent.md
+  - research-skill/SKILL.md
+  - evidence-table.md
+  - reproducibility-report.md
+
+depends_on:
+  - mind-intelligence-systems
