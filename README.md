@@ -3,6 +3,10 @@
 **The reusable implementation layer for building domain-specific research intelligence systems.**
 
 Research Intelligence OS provides the runtime scaffolding, contracts, templates, and evaluation layer that powers the entire research portfolio.
+## Repository boundary
+
+This repository owns reusable research workflow methods: runtime scaffolding, contracts, templates, provenance patterns, and evaluations. It does not own the historical documents processed by those methods, any Sacred Visions collection, or fictional Arcanea canon. Source corpora remain in their portfolio-authorized repositories and are referenced with provenance.
+
 
 ## Purpose
 Enable rapid, consistent, high-quality development of research agents, skills, and workflows. It is the "engine" that domain systems (psychology, neuroscience) and the broader portfolio build upon.
