@@ -1,5 +1,10 @@
 # Research Intelligence OS
 
+## Open collaboration
+
+[Research → Working Agent collaboration pack](collaboration/README.md) provides a student lab, contribution record schema and executable contract checks. Version 0.1 is an authored method; it does not establish a running research service or a university partnership. The MIT licence in that folder covers only its new files.
+
+
 **The reusable implementation layer for building domain-specific research intelligence systems.**
 
 Research Intelligence OS provides the runtime scaffolding, contracts, templates, and evaluation layer that powers the entire research portfolio.

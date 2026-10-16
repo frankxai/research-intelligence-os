@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0.0",
+  "record_id": "example-retrieval-abstention",
+  "source": {
+    "url": "https://example.org/research",
+    "identifier": "example-only-not-a-real-paper",
+    "inspection_scope": "metadata_abstract"
+  },
+  "hypothesis": "A retrieval pipeline with abstention may reduce unsupported answers on a fixed public task set.",
+  "status": "candidate",
+  "protocol": {
+    "baseline": "Unrun baseline; select and pin after source inspection",
+    "candidate": "Proposed source-linked retrieval with abstention",
+    "task_set": "Unselected; inspect rights and freeze before execution",
+    "metrics": [
+      "task success",
+      "unsupported-answer rate",
+      "cost per task"
+    ],
+    "approved_cost_ceiling_eur": 0
+  },
+  "result": {
+    "outcome": "not_run",
+    "evidence": null,
+    "actual_cost_eur": null,
+    "limitations": [
+      "Synthetic example; no experiment performed.",
+      "A zero ceiling authorises no paid compute."
+    ]
+  },
+  "review": {
+    "reviewer": null,
+    "receipt": null,
+    "verdict": "not_reviewed"
+  },
+  "upstream": {
+    "submission": null,
+    "acceptance": null
+  },
+  "rights": {
+    "code_license": null,
+    "data_license": null,
+    "permission_to_run": false
+  }
+}
