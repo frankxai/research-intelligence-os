@@ -1,0 +1,371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Research Translation Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "source",
+    "hypothesis",
+    "status",
+    "protocol",
+    "result",
+    "review",
+    "upstream",
+    "rights"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{3,80}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "identifier",
+        "inspection_scope"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^\\s]+$"
+        },
+        "identifier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inspection_scope": {
+          "enum": [
+            "metadata_abstract",
+            "research_note",
+            "full_paper_and_code",
+            "independent_rerun"
+          ]
+        }
+      }
+    },
+    "hypothesis": {
+      "type": "string",
+      "minLength": 10
+    },
+    "status": {
+      "enum": [
+        "candidate",
+        "running",
+        "evaluated",
+        "submitted",
+        "accepted",
+        "inconclusive"
+      ]
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseline",
+        "candidate",
+        "task_set",
+        "metrics",
+        "approved_cost_ceiling_eur"
+      ],
+      "properties": {
+        "baseline": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_set": {
+          "type": "string",
+          "minLength": 1
+        },
+        "metrics": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "approved_cost_ceiling_eur": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "evidence",
+        "actual_cost_eur",
+        "limitations"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "not_run",
+            "measured",
+            "inconclusive"
+          ]
+        },
+        "evidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri",
+          "pattern": "^https?://[^\\s]+$"
+        },
+        "actual_cost_eur": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewer",
+        "receipt",
+        "verdict"
+      ],
+      "properties": {
+        "reviewer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "receipt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri",
+          "pattern": "^https?://[^\\s]+$"
+        },
+        "verdict": {
+          "enum": [
+            "not_reviewed",
+            "repair",
+            "pass"
+          ]
+        }
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "submission",
+        "acceptance"
+      ],
+      "properties": {
+        "submission": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri",
+          "pattern": "^https?://[^\\s]+$"
+        },
+        "acceptance": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri",
+          "pattern": "^https?://[^\\s]+$"
+        }
+      }
+    },
+    "rights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code_license",
+        "data_license",
+        "permission_to_run"
+      ],
+      "properties": {
+        "code_license": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data_license": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permission_to_run": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "evaluated",
+              "submitted",
+              "accepted"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "measured",
+                  "inconclusive"
+                ]
+              },
+              "evidence": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https?://[^\\s]+$"
+              },
+              "actual_cost_eur": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          "rights": {
+            "properties": {
+              "permission_to_run": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "submitted",
+              "accepted"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "upstream": {
+            "properties": {
+              "submission": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https?://[^\\s]+$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "accepted"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "upstream": {
+            "properties": {
+              "acceptance": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https?://[^\\s]+$"
+              }
+            }
+          },
+          "review": {
+            "properties": {
+              "verdict": {
+                "const": "pass"
+              },
+              "receipt": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https?://[^\\s]+$"
+              },
+              "reviewer": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "inspection_scope": {
+                "const": "independent_rerun"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "measured",
+                  "inconclusive"
+                ]
+              },
+              "evidence": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https?://[^\\s]+$"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
