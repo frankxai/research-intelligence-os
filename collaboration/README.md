@@ -47,3 +47,5 @@ python -m pip install jsonschema==4.26.0
 python -m unittest discover -s collaboration -p 'test_*.py'
 ```
 No scheduled CI, paid compute or external runtime is activated by this pack.
+
+This is a scoped teaching record, not the complete scientific claim and publication lineage tracked in [Research Intelligence OS #3](https://github.com/frankxai/research-intelligence-os/issues/3). Source hashes/locators, reviewer qualification and conflicts, receipt authentication, retraction checks and discipline-specific controls remain work for that normative contract. Do not use this teaching schema to certify scientific findings or approve an Atlas publication.
