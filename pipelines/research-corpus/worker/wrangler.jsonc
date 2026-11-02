@@ -1,0 +1,24 @@
+{
+  "$schema": "https://unpkg.com/wrangler@4.152.0/config-schema.json",
+  // Research knowledge layer: R2 corpus -> AI Search (built-in storage) -> search, answers and MCP.
+  // Distinct from the starlight-agents plane, which keeps its own Vectorize evidence index.
+  "name": "starlight-research",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-10-27",
+  "workers_dev": true,
+  "preview_urls": false,
+
+  "ai_search_namespaces": [{ "binding": "AI_SEARCH", "namespace": "default" }],
+  "ai": { "binding": "AI" },
+  "r2_buckets": [{ "binding": "CORPUS", "bucket_name": "starlight-research-corpus" }],
+
+  "vars": {
+    "INSTANCE": "starlight-research",
+    "ANSWER_MODEL": "@cf/zai-org/glm-5.3"
+  },
+
+  // RESEARCH_TOKEN is a Worker secret. Without it every request is refused (fail closed).
+  "secrets": { "required": ["RESEARCH_TOKEN"] },
+
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

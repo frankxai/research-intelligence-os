@@ -1,70 +1,88 @@
 # Research corpus pipeline
 
-Turns Gemini Deep Research reports in Google Drive into a searchable corpus that both cloud agents and local CLI agents can query, and gives every new agent session a brief with the newest models, the newest research and the research that is due.
+Turns Gemini Deep Research reports, estate documents and live model catalogs into one searchable corpus that cloud agents and local CLI agents query the same way. Every new Claude Code session also starts with a brief: newest models, newest research, research that is due.
 
 ```text
-Gemini Deep Research ──export to Docs──▶ Google Drive
-                                            │  rclone (drive.readonly)
-                                            ▼
-                     ~/.starlight/research/corpus/<domain>/<date>-<slug>.md   (front matter: source, kind, verification)
-                                            │  wrangler r2 object put
-                                            ▼
-                              R2 bucket: starlight-research-corpus
-                                            │  automatic sync
-                                            ▼
-                    Cloudflare AI Search: starlight-research  (hybrid search + reranking)
-                       │                    │                         │
-             Workers binding        wrangler ai-search search     MCP endpoint (optional)
-         (starlight-agents plane)   (corpus.mjs search, any CLI)
+ Google Drive (Deep Research)   estate / repo docs     provider model APIs
+        │ rclone drive.readonly       │ import              │ brief
+        ▼                             ▼                     ▼
+   ~/.starlight/research/corpus/<domain>/*.md   (front matter: source, commit, kind, verification)
+        │ push (wrangler r2 object put)
+        ▼
+   R2 starlight-research-corpus ──/sync──▶ AI Search "starlight-research" (built-in storage, hybrid + rerank)
+                                                    │
+                                   Worker starlight-research (bearer auth, fail closed)
+                       /search · /ask (cited, Workers AI) · /status · /mcp
+                         │                    │                         │
+                Claude Code (HTTP MCP,   Codex / Grok / Gemini CLI   starlight-agents plane
+                 headersHelper)          (stdio mcp-bridge.mjs)      (service binding, next)
 ```
 
 ## Why these choices
 
-- **AI Search over hand-built Vectorize ingestion.** AI Search chunks, embeds, indexes and keeps the R2 bucket in sync, with hybrid keyword and vector search plus reranking. Hand-rolling that on Vectorize would add code without adding capability for a document corpus. The `starlight-agents` Worker keeps its own `starlight-evidence` Vectorize index for mission evidence; the two serve different jobs.
-- **R2 as the corpus store.** AI Search indexes R2 natively. The registry's media fabric puts web binaries on Vercel Blob; this corpus is agent context, never served to the web, so it is a documented R2 workload exception.
-- **Code public, corpus private.** This repository is public. Titles, document IDs and contents live only in `~/.starlight/research` and the private bucket.
-- **Every report is labelled `unverified-ai-synthesis`.** Deep Research is a model's reading of the web. Agents cite it as a claim with its source, never as measured fact. Short Gemini "Codex/Blueprint" write-ups are indexed as `gemini-canvas`, separate from research, because some of them contain invented run logs.
+- **AI Search, created by the Worker's namespace binding.** `wrangler ai-search create` demands an AI Search service token for both R2 and built-in instances. A Worker with an `ai_search_namespaces` binding creates a built-in instance at runtime with no token, then copies R2 objects in through the Items API. AI Search handles chunking, embeddings, hybrid keyword and vector search, and reranking.
+- **R2 stays the source of record** for the corpus; AI Search is a derived index that `/sync` rebuilds from it (`_sync/state.json` tracks etags). The `starlight-agents` Worker keeps its own `starlight-evidence` Vectorize index for mission evidence.
+- **One Worker, many clients.** HTTP MCP for clients that support auth headers, a stdio bridge for those that don't, plain HTTP for scripts and Workers.
+- **Code public, corpus private.** This repository is public. Titles, IDs and contents live in `~/.starlight/research` and the private bucket. The Worker refuses every request without the bearer token; `/health` reveals nothing.
+- **Provenance on every document.** Deep Research and Gemini write-ups carry `verification: unverified-ai-synthesis`; local files carry their path and the commit they were read at, or `working-tree-draft` when uncommitted; model catalogs carry `measured-from-provider-api`. Answers from `/ask` cite source keys and repeat the label.
 
 ## Commands
 
 | Command | Does |
 |---|---|
-| `node corpus.mjs list` | lists Drive root Docs through the `gdrive:` rclone remote |
-| `node corpus.mjs classify [listing.json]` | writes `inventory.json`: kind, domain, duplicate, include |
-| `node corpus.mjs export` | exports changed included Docs as markdown with front matter |
-| `node corpus.mjs push` | uploads changed corpus files to R2 |
-| `node corpus.mjs search "<question>"` | queries the AI Search instance |
-| `node corpus.mjs brief` | writes `~/.starlight/brief/session-brief.md` and a heartbeat |
-| `node corpus.mjs queue` | domains whose newest report is older than their window |
-| `node corpus.mjs usage snapshot --remaining N` | records the Deep Research count shown in the Gemini app |
-| `node corpus.mjs usage run --domain <id> --title "..."` | logs a Deep Research run |
+| `node corpus.mjs list` · `classify` · `export` | Drive listing → inventory (kind, domain, re-run dedupe, personal exclusion) → markdown export |
+| `node corpus.mjs import <f.md>... --domain <id>` | brings local or repo docs in with path and commit provenance |
+| `node corpus.mjs push` | uploads changed files to R2 and triggers `/sync` |
+| `node corpus.mjs sync` · `status` | Worker: copy R2 into AI Search · indexing state per item |
+| `node corpus.mjs search "<q>" [--domain id]` | ranked passages with source keys |
+| `node corpus.mjs ask "<q>" [--domain id]` | cited answer (model: `ANSWER_MODEL` in `worker/wrangler.jsonc`) |
+| `node corpus.mjs brief` | session brief plus `_platform/latest-models.md` catalog in the corpus |
+| `node corpus.mjs queue` | domains whose newest Deep Research report is past its window |
+| `node corpus.mjs usage snapshot\|run\|show` | Gemini Deep Research usage ledger |
 
-`node --test lib.test.mjs` covers classification, duplicates, personal exclusion, staleness, usage and the brief.
+Tests: `node --test lib.test.mjs`.
 
-Personal documents are excluded by generic markers plus private patterns in `~/.starlight/research/exclude.txt`.
+## Clients
 
-## One-time setup
+**Claude Code** (user scope, all projects):
 
-1. `rclone config create gdrive drive scope=drive.readonly` (opens a Google sign-in; read-only).
-2. Create an AI Search service API token at `https://dash.cloudflare.com/<account>/ai/ai-search/tokens`.
-3. `npx wrangler ai-search create starlight-research --type r2 --source starlight-research-corpus --reranking --hybrid-search --include-items "**/*.md"`.
-4. Optional, after reading the security note below: enable the instance's MCP endpoint.
-5. Optional: `pwsh -File register-daily.ps1` registers the daily refresh. It is staged, not registered.
+```text
+claude mcp add-json starlight-research '{"type":"http","url":"https://starlight-research.frankxai.workers.dev/mcp","headersHelper":"pwsh -NoProfile -File C:/Users/frank/.starlight/research/mcp-headers.ps1"}' --scope user
+```
 
-**Security note on the MCP endpoint.** The AI Search public endpoint is reachable by anyone with the URL. The corpus holds private strategy, so keep it off and query through `wrangler` (authenticated by your Cloudflare login) or a Workers binding, until the endpoint sits behind Cloudflare Access.
+The header helper reads the token from `worker-secrets.env` at connect time, so no config file holds it.
+
+**Codex, Grok CLI, Gemini CLI, Hermes**: run `mcp-bridge.mjs` as a stdio server (installed copy at `~/.starlight/research/bin/mcp-bridge.mjs`). Codex:
+
+```toml
+[mcp_servers.starlight-research]
+command = "node"
+args = ["C:/Users/frank/.starlight/research/bin/mcp-bridge.mjs"]
+```
+
+Tools: `research_search`, `research_ask`, `research_read`, `research_list`.
+
+## Worker
+
+`worker/` deploys with `wrangler deploy` (first deploy: `wrangler deploy --secrets-file ~/.starlight/research/worker-secrets.env`). Rotate the token by writing a new value to that file and running `wrangler secret put RESEARCH_TOKEN` with it; every client reads the file, so nothing else changes.
+
+## Remaining one-time setup
+
+1. `rclone config create gdrive drive scope=drive.readonly` (Google sign-in, read-only) to export Deep Research reports in bulk.
+2. Optional: `pwsh -File register-daily.ps1` registers the daily refresh (staged, not registered).
 
 ## Session brief
 
-A Claude Code SessionStart hook prints the cached brief, so a new session starts knowing the newest Workers AI and Vercel AI Gateway models (from their live catalogs), the newest research, the due domains and today's Deep Research usage. The brief costs no network call at session start; `brief` refreshes it.
+A Claude Code SessionStart hook prints `~/.starlight/brief/session-brief.md`, so a new session knows the newest Workers AI and Vercel AI Gateway models (from their live catalogs, ranked by `released`), the newest research, the due domains and today's Deep Research usage, without a network call at start-up.
 
 ## Gemini usage
 
-Since May 2026 Google no longer publishes a fixed Ultra Deep Research quota, and third-party figures conflict (120 and 200 per day). The ledger therefore records what the app shows, plus each run, so planning uses observed numbers.
+Since May 2026 Google no longer publishes a fixed Ultra Deep Research quota, and third-party figures conflict (120 and 200 per day). The ledger records the count the app shows and each run.
 
 ## NotebookLM
 
-There is no NotebookLM API for consumer or Ultra accounts. The Enterprise API (Google Cloud, alpha) is the only official one, and unofficial clients work from browser cookies, which this estate does not export. NotebookLM reads Google Docs from Drive directly, so the workable path is one notebook per domain with the exported reports added as Drive sources.
+There is no NotebookLM API for consumer or Ultra accounts; the Enterprise API (Google Cloud, alpha) is the only official one, and unofficial clients need browser cookies, which this estate does not export. NotebookLM reads Drive Docs directly: one notebook per domain with the exported reports as sources.
 
 ## Deep Research prompts
 
-`deep-research-prompts.md` has a shared frame and one block per domain. The frame asks for dated primary sources, a claims table and a split between facts, forecasts and opinions, which makes the report retrievable passage by passage.
+`deep-research-prompts.md`: a shared frame and one block per domain, asking for dated primary sources, a claims table and a split between facts, forecasts and opinions.

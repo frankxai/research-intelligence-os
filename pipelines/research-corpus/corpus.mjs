@@ -5,8 +5,11 @@
 //   node corpus.mjs list                 rclone lists Drive root Docs -> drive-listing.json
 //   node corpus.mjs classify [listing]   listing -> inventory.json (kind, domain, include)
 //   node corpus.mjs export               rclone exports included Docs as markdown + front matter
-//   node corpus.mjs push                 uploads corpus/*.md to the R2 bucket AI Search indexes
-//   node corpus.mjs search "<question>"  queries the AI Search instance (prints JSON)
+//   node corpus.mjs import <f.md>... --domain <id> [--kind k]   local or repo docs, with path + commit provenance
+//   node corpus.mjs push                 uploads changed corpus/*.md to R2, then asks the Worker to sync
+//   node corpus.mjs sync | status        Worker: copy R2 into AI Search | indexing state
+//   node corpus.mjs search "<q>" [--domain id]   ranked passages from the Worker
+//   node corpus.mjs ask "<q>" [--domain id]      cited answer from the Worker
 //   node corpus.mjs brief                writes the session brief from live model catalogs
 //   node corpus.mjs queue                domains whose newest report is past its window
 //   node corpus.mjs usage snapshot --remaining N [--note "..."]   record a reading from the Gemini app
@@ -21,7 +24,8 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DEFAULT_PERSONAL_PATTERNS, briefMarkdown, classify, corpusKey, dueDomains, frontMatter, usageToday,
+  DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
+  localFrontMatter, slugify, usageToday,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +35,9 @@ const RCLONE_REMOTE = process.env.RESEARCH_DRIVE_REMOTE || 'gdrive:';
 const BUCKET = process.env.RESEARCH_BUCKET || 'starlight-research-corpus';
 const INSTANCE = process.env.RESEARCH_AI_SEARCH || 'starlight-research';
 const GATEWAY_MODELS_URL = 'https://ai-gateway.vercel.sh/v1/models';
+const WORKER_URL = process.env.RESEARCH_URL || 'https://starlight-research.frankxai.workers.dev';
+// `npx --no-install` breaks whenever the pinned wrangler version is not cached; the installed binary does not.
+const WRANGLER = process.env.RESEARCH_WRANGLER || 'wrangler';
 
 const P = {
   listing: path.join(HOME, 'drive-listing.json'),
@@ -39,7 +46,29 @@ const P = {
   corpus: path.join(HOME, 'corpus'),
   usage: path.join(HOME, 'gemini-usage.jsonl'),
   manifest: path.join(HOME, 'push-manifest.json'),
+  workerSecrets: path.join(HOME, 'worker-secrets.env'),
 };
+
+function workerToken() {
+  if (process.env.RESEARCH_TOKEN) return process.env.RESEARCH_TOKEN;
+  if (!existsSync(P.workerSecrets)) return null;
+  const line = readFileSync(P.workerSecrets, 'utf8').split(/\r?\n/).find((l) => l.startsWith('RESEARCH_TOKEN='));
+  return line ? line.slice('RESEARCH_TOKEN='.length).trim() : null;
+}
+
+async function worker(route, body = {}) {
+  const token = workerToken();
+  if (!token) die(`no RESEARCH_TOKEN (env or ${P.workerSecrets})`);
+  const res = await fetch(`${WORKER_URL}${route}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(180_000),
+  });
+  const out = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok) die(`${route} failed (${res.status}): ${out.error ?? JSON.stringify(out)}`);
+  return out;
+}
 
 const domains = JSON.parse(readFileSync(path.join(HERE, 'domains.json'), 'utf8')).domains;
 
@@ -133,33 +162,84 @@ function cmdExport() {
   console.log(`exported ${done} changed document(s) -> ${P.corpus}`);
 }
 
+// The commit is recorded only when the file is unmodified at HEAD; a dirty file is a draft.
+function gitCommitFor(file) {
+  const dir = path.dirname(file);
+  const name = path.basename(file);
+  const dirty = spawnSync('git', ['-C', dir, 'status', '--porcelain', '--', name], { encoding: 'utf8' });
+  if (dirty.status !== 0 || dirty.stdout.trim()) return null;
+  const log = spawnSync('git', ['-C', dir, 'log', '-1', '--format=%H', '--', name], { encoding: 'utf8' });
+  return log.status === 0 ? log.stdout.trim() || null : null;
+}
+
+function cmdImport() {
+  const files = process.argv.slice(3).filter((a, i, all) => !a.startsWith('--') && !all[i - 1]?.startsWith('--'));
+  const domain = flag('domain');
+  const kind = flag('kind') || 'estate-doc';
+  if (!files.length || !domains.some((d) => d.id === domain)) {
+    die(`usage: import <file.md>... --domain <${domains.map((d) => d.id).join('|')}> [--kind estate-doc]`);
+  }
+  const importedAt = new Date().toISOString();
+  for (const file of files.map((f) => path.resolve(f))) {
+    const text = readFileSync(file, 'utf8');
+    const title = (text.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(file, '.md')).trim();
+    const modified = statSync(file).mtime.toISOString();
+    const commit = gitCommitFor(file);
+    const target = path.join(P.corpus, domain, `estate-${slugify(path.basename(file, '.md'))}.md`);
+    writeAtomic(target, localFrontMatter({ title, sourcePath: file, commit, domain, kind, modified }, importedAt) + text);
+    console.log(`${commit ? 'committed' : 'DRAFT    '} ${path.relative(P.corpus, target)}`);
+  }
+}
+
 function walk(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
     d.isDirectory() ? walk(path.join(dir, d.name)) : d.name.endsWith('.md') ? [path.join(dir, d.name)] : []);
 }
 
-function cmdPush() {
+async function cmdPush() {
   const manifest = readJson(P.manifest, {});
   let pushed = 0;
   for (const file of walk(P.corpus)) {
     const key = path.relative(P.corpus, file).split(path.sep).join('/');
     const mtime = statSync(file).mtimeMs;
     if (manifest[key] === mtime) continue;
-    run('npx', ['--no-install', 'wrangler', 'r2', 'object', 'put', `${BUCKET}/${key}`, '--file', file,
+    run(WRANGLER, ['r2', 'object', 'put', `${BUCKET}/${key}`, '--file', file,
       '--content-type', 'text/markdown; charset=utf-8', '--remote']);
     manifest[key] = mtime;
     pushed += 1;
   }
   writeAtomic(P.manifest, JSON.stringify(manifest, null, 2));
-  console.log(`pushed ${pushed} file(s) to r2://${BUCKET}; AI Search instance "${INSTANCE}" re-indexes on its sync`);
+  console.log(`pushed ${pushed} file(s) to r2://${BUCKET}`);
+  if (pushed && workerToken()) console.log(JSON.stringify(await worker('/sync'), null, 2));
 }
 
-function cmdSearch() {
-  const query = process.argv.slice(3).filter((a) => !a.startsWith('--')).join(' ');
-  if (!query) die('usage: corpus.mjs search "<question>"');
-  const res = run('npx', ['--no-install', 'wrangler', 'ai-search', 'search', INSTANCE, '--query', query, '--json']);
-  process.stdout.write(res.stdout);
+function positional() {
+  return process.argv.slice(3).filter((a, i, all) => !a.startsWith('--') && !all[i - 1]?.startsWith('--')).join(' ');
+}
+
+async function cmdSearch() {
+  const query = positional();
+  if (!query) die('usage: corpus.mjs search "<question>" [--domain <id>] [--limit N]');
+  const out = await worker('/search', { query, domain: flag('domain'), limit: Number(flag('limit') || 8) });
+  for (const p of out.passages) console.log(`\n[${p.score}] ${p.key}\n${p.text.trim().slice(0, 600)}`);
+  if (!out.passages.length) console.log('no passages (is the corpus indexed? run: corpus.mjs status)');
+}
+
+async function cmdAsk() {
+  const question = positional();
+  if (!question) die('usage: corpus.mjs ask "<question>" [--domain <id>]');
+  const out = await worker('/ask', { question, domain: flag('domain') });
+  console.log(`${out.answer}\n\nSources (${out.model}):`);
+  for (const s of out.sources) console.log(`  [${s.score}] ${s.key}`);
+}
+
+async function cmdStatus() {
+  console.log(JSON.stringify(await worker('/status'), null, 2));
+}
+
+async function cmdSync() {
+  console.log(JSON.stringify(await worker('/sync'), null, 2));
 }
 
 async function fetchGateway() {
@@ -170,7 +250,7 @@ async function fetchGateway() {
 }
 
 function fetchWorkersAi() {
-  const res = run('npx', ['--no-install', 'wrangler', 'ai', 'models', 'list', '--json'], { allowFail: true });
+  const res = run(WRANGLER, ['ai', 'models', 'list', '--json'], { allowFail: true });
   try { return res.status === 0 ? jsonFrom(res.stdout) : null; } catch { return null; }
 }
 
@@ -187,6 +267,8 @@ async function cmdBrief() {
     now, workersAi, gateway, inventory, due: dueDomains(inventory, domains, now.getTime()), usage: usageToday(readUsage(), now),
   });
   writeAtomic(BRIEF_PATH, md);
+  // The full catalog also goes into the corpus, so cloud agents searching it know the newest models too.
+  if (workersAi || gateway) writeAtomic(path.join(P.corpus, '_platform', 'latest-models.md'), catalogMarkdown({ now, workersAi, gateway }));
   writeAtomic(path.join(path.dirname(BRIEF_PATH), 'heartbeat.json'), JSON.stringify({
     ts: now.toISOString(), source: 'research-corpus brief', status: workersAi && gateway ? 'ok' : 'degraded',
     workersAi: workersAi?.length ?? 0, gateway: gateway?.length ?? 0, reports: inventory.filter((e) => e.include).length,
@@ -219,7 +301,10 @@ function cmdUsage() {
   console.log(JSON.stringify(usageToday(readUsage()), null, 2));
 }
 
-const commands = { list: cmdList, classify: cmdClassify, export: cmdExport, push: cmdPush, search: cmdSearch, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage };
+const commands = {
+  list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, sync: cmdSync, status: cmdStatus,
+  search: cmdSearch, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
+};
 const cmd = commands[process.argv[2]];
 if (!cmd) die(`commands: ${Object.keys(commands).join(', ')}`, 2);
 await cmd();

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { briefMarkdown, classify, corpusKey, dueDomains, frontMatter, routeDomain, usageToday } from './lib.mjs';
+import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, usageToday } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
 const DOC = 'application/vnd.google-apps.document';
@@ -98,6 +98,29 @@ test('the brief ranks gateway models by release date and skips batch variants', 
   const lines = md.split('\n').filter((l) => l.startsWith('- `'));
   assert.equal(lines[0], '- `new/model` (2026-09-01, 1000k ctx, $5/$25 per M in/out)');
   assert.ok(!md.includes('model-batch') && !md.includes('img/model'));
+});
+
+test('a local file is a draft unless its committed revision is known', () => {
+  const base = { title: 'TRUTH', sourcePath: 'C:/x/TRUTH.md', domain: 'business-strategy', kind: 'estate-truth', modified: '2026-10-31T00:00:00Z' };
+  assert.match(localFrontMatter({ ...base, commit: null }, 'now'), /verification: working-tree-draft/);
+  const committed = localFrontMatter({ ...base, commit: 'abc123' }, 'now');
+  assert.match(committed, /source_commit: abc123/);
+  assert.match(committed, /verification: committed-estate-document/);
+});
+
+test('the searchable catalog lists Workers AI text models and labels itself as measured', () => {
+  const md = catalogMarkdown({
+    now: new Date('2026-11-02T00:00:00Z'),
+    workersAi: [
+      { name: '@cf/a/old', task: { name: 'Text Generation' }, created_at: '2026-01-01 00:00:00', description: 'old' },
+      { name: '@cf/a/new', task: { name: 'Text Generation' }, created_at: '2026-10-17 00:00:00', description: 'new' },
+      { name: '@cf/a/embed', task: { name: 'Text Embeddings' }, created_at: '2026-10-20 00:00:00' },
+    ],
+    gateway: null,
+  });
+  assert.match(md, /verification: measured-from-provider-api/);
+  assert.ok(md.indexOf('@cf/a/new') < md.indexOf('@cf/a/old'));
+  assert.ok(!md.includes('@cf/a/embed'));
 });
 
 test('the brief degrades honestly when catalogs are unavailable', () => {

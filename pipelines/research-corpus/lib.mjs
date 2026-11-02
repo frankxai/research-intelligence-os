@@ -93,6 +93,25 @@ export function frontMatter(entry, exportedAt) {
   return lines.join('\n');
 }
 
+// Local files (estate truth, repo docs, intel briefs) enter the corpus with the path and commit
+// they were read from, so an agent can tell a reviewed file from a working-tree draft.
+export function localFrontMatter({ title, sourcePath, commit, domain, kind, modified }, importedAt) {
+  return [
+    '---',
+    `title: ${JSON.stringify(title)}`,
+    'source: local-file',
+    `source_path: ${JSON.stringify(sourcePath)}`,
+    `source_commit: ${commit || 'untracked-or-uncommitted'}`,
+    `kind: ${kind}`,
+    `domain: ${domain}`,
+    `modified: ${modified}`,
+    `imported: ${importedAt}`,
+    `verification: ${commit ? 'committed-estate-document' : 'working-tree-draft'}`,
+    '---',
+    '',
+  ].join('\n');
+}
+
 export function corpusKey(entry) {
   return `${entry.domain}/${entry.createdTime.slice(0, 10)}-${slugify(entry.title)}.md`;
 }
@@ -133,6 +152,33 @@ function newest(list, dateOf, n) {
   return [...list].sort((a, b) => dateOf(b) - dateOf(a)).slice(0, n);
 }
 
+// The searchable catalog: every Workers AI text model and the 40 newest gateway language models.
+export function catalogMarkdown({ now, workersAi, gateway }) {
+  const day = now.toISOString().slice(0, 10);
+  const out = [
+    '---', 'title: "Latest AI models on Cloudflare Workers AI and Vercel AI Gateway"', 'source: live-catalogs',
+    'kind: platform-catalog', 'domain: ai-models-platforms', `generated: ${now.toISOString()}`,
+    'verification: measured-from-provider-api', '---', '',
+    `# Latest AI models (catalog snapshot ${day})`, '',
+    'Generated from the providers\' own model APIs, not from memory. Use these exact model IDs.', '',
+  ];
+  if (workersAi?.length) {
+    out.push('## Cloudflare Workers AI text generation models (newest first)', '');
+    const text = workersAi.filter((m) => m.task?.name === 'Text Generation');
+    for (const m of newest(text, (x) => Date.parse(x.created_at), text.length)) {
+      out.push(`- \`${m.name}\` added ${m.created_at.slice(0, 10)}: ${(m.description || '').replace(/\s+/g, ' ').slice(0, 160)}`);
+    }
+    out.push('');
+  }
+  if (gateway?.length) {
+    out.push('## Vercel AI Gateway language models (40 newest by release date)', '');
+    const language = gateway.filter((m) => m.type === 'language' && !m.id.endsWith('-batch'));
+    for (const m of newest(language, (x) => Number(x.released || 0), 40)) out.push(`- \`${m.id}\` ${gatewayFacts(m)}`);
+    out.push('');
+  }
+  return out.join('\n');
+}
+
 export function briefMarkdown({ now, workersAi, gateway, inventory, due, usage }) {
   const out = [`# Starlight session brief: ${now.toISOString().slice(0, 16).replace('T', ' ')} UTC`, ''];
 
@@ -156,7 +202,7 @@ export function briefMarkdown({ now, workersAi, gateway, inventory, due, usage }
   for (const e of newest(reports, (r) => Date.parse(r.createdTime), 6)) {
     out.push(`- ${e.createdTime.slice(0, 10)} [${e.domain}] ${e.title}`);
   }
-  out.push('Search it: `node pipelines/research-corpus/corpus.mjs search "<question>"`. Reports are unverified AI synthesis: cite as claims.');
+  out.push('Search it with the `starlight-research` MCP tools (research_search, research_ask), or `node pipelines/research-corpus/corpus.mjs search "<question>"`. Reports are unverified AI synthesis: cite as claims.');
   out.push('');
 
   const dueList = due.filter((d) => d.due).slice(0, 6);
