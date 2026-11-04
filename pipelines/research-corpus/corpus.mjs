@@ -16,8 +16,12 @@
 //   node corpus.mjs usage run --domain <id> --title "<topic>"     log a Deep Research run
 //   node corpus.mjs usage reading --session P --weekly P [...]   record the Usage limits page (percent meter)
 //   node corpus.mjs usage done --title "<topic>"                 mark a run finished (pair with a reading after it)
+//   node corpus.mjs usage abandon --title "<topic>" [--at ISO]    close a stalled run; never measured, stops blocking others
 //   node corpus.mjs usage plan                                   measured % cost per run, runs left this window/week
 //   node corpus.mjs usage show
+//   node corpus.mjs verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force]
+//   node corpus.mjs verify score <corpus-key|claims.jsonl>        tally checked claims, release pass/blocked
+//   node corpus.mjs doctor [--skip check,check]                    silent-failure checks; exit 1 on any fail
 //
 // All private state lives in RESEARCH_HOME (default ~/.starlight/research), never in this repo.
 
@@ -29,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
   localFrontMatter, slugify, usageToday, usagePlan, evidenceStats, chunkMarkdown, bm25Rank,
+  extractClaims, sampleClaims, claimRecords, scoreClaims, claimChecklist, pipelineHealth,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -94,6 +99,11 @@ function writeAtomic(file, text) {
 function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
   return i > -1 ? process.argv[i + 1] : undefined;
+}
+
+// A boolean switch: `flag` returns the next argument, which is undefined when the switch comes last.
+function has(name) {
+  return process.argv.includes(`--${name}`);
 }
 
 // npx and rclone resolve to .cmd shims on Windows, which Node only spawns through a shell.
@@ -237,7 +247,7 @@ function positional() {
 async function cmdSearch() {
   const query = positional();
   if (!query) die('usage: corpus.mjs search "<question>" [--domain <id>] [--limit N] [--local]');
-  if (flag('local') !== undefined || !existsSync(P.workerSecrets)) return localSearch(query);
+  if (has('local') || !existsSync(P.workerSecrets)) return localSearch(query);
   const out = await worker('/search', { query, domain: flag('domain'), limit: Number(flag('limit') || 8) });
   for (const p of out.passages) console.log(`\n[${p.score}] ${p.key}\n${p.text.trim().slice(0, 600)}`);
   if (!out.passages.length) console.log('no passages (is the corpus indexed? run: corpus.mjs status)');
@@ -451,16 +461,88 @@ function cmdUsage() {
     }) + '\n');
   } else if (sub === 'done') {
     appendFileSync(P.usage, JSON.stringify({ ts, type: 'done', title: flag('title') ?? null }) + '\n');
+  } else if (sub === 'abandon') {
+    // A run that stalled or produced no report: closed, never measured. --at is when it stopped (ISO).
+    const [title, at] = [flag('title'), flag('at')];
+    if (!title || (at !== undefined && Number.isNaN(Date.parse(at)))) die('usage: usage abandon --title "<run title>" [--at <ISO time it stopped>] [--note "..."]');
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'abandoned', title, at: at ? new Date(at).toISOString() : ts, note: flag('note') ?? null }) + '\n');
   } else if (sub === 'plan') {
     console.log(JSON.stringify(usagePlan(readUsage()), null, 2));
     return;
-  } else if (sub !== 'show') die('usage: usage snapshot|run|reading|done|plan|show');
+  } else if (sub !== 'show') die('usage: usage snapshot|run|reading|done|abandon|plan|show');
   console.log(JSON.stringify(usageToday(readUsage()), null, 2));
+}
+
+function readJsonl(file) {
+  return readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+}
+
+// Claim sampling and scoring. Records live in RESEARCH_HOME/verify/<domain>__<report>.claims.jsonl;
+// the checker (a different agent from the one that wrote the report) edits them in place.
+function claimsFileFor(target) {
+  if (target.endsWith('.jsonl')) return path.resolve(target);
+  const key = path.isAbsolute(target) ? path.relative(P.corpus, target).split(path.sep).join('/') : target;
+  return path.join(HOME, 'verify', `${key.replace(/\.md$/, '').split('/').join('__')}.claims.jsonl`);
+}
+
+function cmdVerify() {
+  const [sub, target] = [process.argv[3], process.argv[4]];
+  if (!['sample', 'score'].includes(sub) || !target) {
+    die('usage: verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force] | verify score <corpus-key|claims.jsonl>');
+  }
+  const claimsFile = claimsFileFor(target);
+  if (sub === 'score') {
+    if (!existsSync(claimsFile)) die(`no claims file at ${claimsFile}; run "verify sample" first`);
+    const records = readJsonl(claimsFile);
+    for (const r of records) console.log(`${String(r.status ?? 'pending').padEnd(12)} ${String(r.source_url ?? 'no-url').replace(/^https?:\/\//, '').slice(0, 70)}`);
+    console.log(JSON.stringify({ file: claimsFile, ...scoreClaims(records) }, null, 2));
+    return;
+  }
+  const key = path.isAbsolute(target) ? path.relative(P.corpus, target).split(path.sep).join('/') : target;
+  const reportFile = path.resolve(P.corpus, key);
+  if (!reportFile.startsWith(path.resolve(P.corpus) + path.sep)) die(`${target} is outside the corpus`);
+  if (!existsSync(reportFile)) die(`no report at ${reportFile}`);
+  const from = flag('from') || 'auto';
+  if (!['auto', 'table', 'prose', 'all'].includes(from)) die('--from must be auto, table, prose or all');
+  if (existsSync(claimsFile) && !has('force') && readJsonl(claimsFile).some((r) => r.status !== 'pending')) {
+    die(`${claimsFile} already holds checked claims; pass --force to resample and overwrite them`);
+  }
+  const claims = extractClaims(readFileSync(reportFile, 'utf8'), { from });
+  if (!claims.length) die(`no claims with a source found in ${key}`);
+  const seed = Number(flag('seed') || 1);
+  const records = claimRecords(sampleClaims(claims, Number(flag('n') || 10), seed), { reportKey: key, sampledAt: new Date().toISOString(), seed });
+  writeAtomic(claimsFile, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const checklist = claimsFile.replace(/\.claims\.jsonl$/, '.checklist.md');
+  writeAtomic(checklist, claimChecklist(records, { reportKey: key, claimsInReport: claims.length }));
+  console.log(JSON.stringify({ report: key, claimsInReport: claims.length, sampled: records.length, seed, claimsFile, checklist,
+    signals: records.flatMap((r) => r.signals).reduce((a, s) => ((a[s] = (a[s] ?? 0) + 1), a), {}) }, null, 2));
+}
+
+function cmdDoctor() {
+  const sourceId = (file) => (readFileSync(file, 'utf8').slice(0, 4096).match(/^source_id: (.+)$/m) || [])[1]?.trim() ?? null;
+  const rel = (root, f) => path.relative(root, f).split(path.sep).join('/');
+  const quarantine = path.join(HOME, 'quarantine');
+  const lastRunFile = path.join(HOME, 'runs', 'last-run.json');
+  const report = pipelineHealth({
+    now: Date.now(),
+    corpus: listCorpusFiles(P.corpus).map((f) => ({ key: rel(P.corpus, f), sourceId: sourceId(f) })),
+    quarantineKeys: listCorpusFiles(quarantine).map((f) => rel(quarantine, f)),
+    excludedIds: existsSync(P.excludeIds) ? readFileSync(P.excludeIds, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [],
+    listingMtimeMs: existsSync(P.listing) ? statSync(P.listing).mtimeMs : null,
+    ledger: readUsage(),
+    lastRun: readJson(lastRunFile, null),
+  });
+  const skip = new Set((flag('skip') || '').split(',').filter(Boolean));
+  const findings = report.findings.filter((f) => !skip.has(f.check));
+  const ok = !findings.some((f) => f.level === 'fail');
+  console.log(JSON.stringify({ ok, findings }, null, 2));
+  if (!ok) process.exit(1);
 }
 
 const commands = {
   list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, sync: cmdSync, status: cmdStatus,
   search: cmdSearch, triage: cmdTriage, eval: cmdEval, audit: cmdAudit, prune: cmdPrune, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
+  verify: cmdVerify, doctor: cmdDoctor,
 };
 const cmd = commands[process.argv[2]];
 if (!cmd) die(`commands: ${Object.keys(commands).join(', ')}`, 2);

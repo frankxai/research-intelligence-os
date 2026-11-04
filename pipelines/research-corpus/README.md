@@ -34,13 +34,29 @@ Turns Gemini Deep Research reports, estate documents and live model catalogs int
 | `node corpus.mjs import <f.md>... --domain <id>` | brings local or repo docs in with path and commit provenance |
 | `node corpus.mjs push` | uploads changed files to R2 and triggers `/sync` |
 | `node corpus.mjs sync` · `status` | Worker: copy R2 into AI Search · indexing state per item |
-| `node corpus.mjs search "<q>" [--domain id]` | ranked passages with source keys |
+| `node corpus.mjs search "<q>" [--domain id] [--local]` | ranked passages with source keys (Worker, or local BM25 when `--local` or no token) |
 | `node corpus.mjs ask "<q>" [--domain id]` | cited answer (model: `ANSWER_MODEL` in `worker/wrangler.jsonc`) |
+| `node corpus.mjs triage summary\|apply` · `audit` · `prune` | reviewer verdicts and quarantine · evidence tally · remove local copies no longer in the inventory |
+| `node corpus.mjs eval [--file q.json]` | hit@1, hit@5, MRR of local BM25 on `eval/questions.json`; a vector index must beat it |
+| `node corpus.mjs verify sample <key> [--n 10] [--seed S]` · `verify score <key>` | claim-level evidence records for a report, then the tally and release verdict (below) |
+| `node corpus.mjs doctor [--skip check]` | silent-failure checks (below); exit 1 on any `fail` |
 | `node corpus.mjs brief` | session brief plus `_platform/latest-models.md` catalog in the corpus |
 | `node corpus.mjs queue` | domains whose newest Deep Research report is past its window |
-| `node corpus.mjs usage snapshot\|run\|show` | Gemini Deep Research usage ledger |
+| `node corpus.mjs usage reading\|run\|done\|abandon\|plan\|show` | Gemini Deep Research usage ledger (below) |
 
 Tests: `node --test lib.test.mjs`.
+
+## Claim verification
+
+A report is trusted claim by claim, not as a document. `verify sample` reads the report's claims table (or, without one, sentences that end in a citation), maps glued citation numbers to the Works cited list, and writes a seeded sample to `RESEARCH_HOME/verify/<domain>__<report>.claims.jsonl` (schema `claim-evidence/v1`: claim, source URL, report's date, excerpt, source's own date, status, contradictions) plus a readable checklist. Deterministic signals come first: `spacing-lost` (the export dropped spaces between dollar signs, so numbers are suspect), `url-not-in-works-cited`, `ref-differs-from-source-url`, `no-source`.
+
+A checker that did not write the report fetches each source and sets `status` to `verified`, `partial`, `unsupported`, `contradicted`, `garbled` or `unreachable`, with a verbatim excerpt. `verify score` blocks release on any contradicted claim, on more than 20% unsupported, contradicted or garbled, on more than 30% unreachable, or on unchecked claims. The thresholds are starting hypotheses.
+
+## Scheduled refresh
+
+`scheduled-run.ps1` (staged, not registered) runs `list`, `classify`, `export` and `doctor` one step at a time with a per-step timeout and a lock, stops at the first failure, logs to `RESEARCH_HOME/runs/` and writes `runs/last-run.json`. `-DryRun` prints the plan. `register-daily.ps1` registers it with the session brief after it; the owner runs that.
+
+`doctor` fails on a quarantine leak (a corpus file whose Drive id is excluded or whose key is in `quarantine/`) and on a failed last run; it warns on a corpus title that matches a quarantined one, a Drive listing older than 36 h, runs logged without `done`, a stale or full usage window, and a missing or skipped run.
 
 ## Clients
 
@@ -69,7 +85,7 @@ Tools: `research_search`, `research_ask`, `research_read`, `research_list`.
 ## Remaining one-time setup
 
 1. `rclone config create gdrive drive scope=drive.readonly` (Google sign-in, read-only) to export Deep Research reports in bulk.
-2. Optional: `pwsh -File register-daily.ps1` registers the daily refresh (staged, not registered).
+2. Optional: `pwsh -File register-daily.ps1` registers the daily refresh (`scheduled-run.ps1` then `brief`; staged, not registered).
 
 ## Session brief
 
@@ -83,6 +99,7 @@ Gemini Ultra meters usage in percent, not runs: `gemini.google.com/usage` shows 
 2. Start it: `usage run --domain <id> --title "<topic>"`.
 3. When it finishes: `usage done --title "<topic>"`, then another `usage reading`.
 4. `usage plan` returns the mean weekly and window percent per run, runs left this window and week, and runs per week. Overlapping runs are skipped because their cost cannot be separated, so run one at a time until you have three measured runs.
+5. A run that stalls or ends without a report: `usage abandon --title "<topic>" --at <ISO time it stopped>`. Until it is closed, every later run counts as overlapping it and cannot be measured.
 
 ## NotebookLM
 

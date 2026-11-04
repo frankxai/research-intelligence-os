@@ -153,18 +153,32 @@ export function usageToday(ledger, now = new Date()) {
 // Gemini Ultra meters usage in percent: a rolling window and a weekly limit, not a run count.
 // A run's cost is the rise in each percentage between the last reading before it started
 // and the first reading after it finished (a 'done' record). Overlapping runs are skipped
-// because their cost cannot be separated.
+// because their cost cannot be separated. A run that never finished is closed with an
+// 'abandoned' record whose `at` says when it stopped; it is never measured, and it stops
+// counting as an overlap after `at`.
+// An end record belongs to the run with its title that was active at the end's effective time
+// (`at` for an abandon), so a retry under the same title is not paired with the first run's end.
+function runEnd(rows, run) {
+  const next = rows.find((r) => r.type === 'run' && r.title === run.title && r.ts > run.ts);
+  const ends = rows
+    .filter((r) => (r.type === 'done' || r.type === 'abandoned') && r.title === run.title)
+    .map((r) => ({ type: r.type, ts: r.at ?? r.ts }))
+    .filter((e) => e.ts >= run.ts && (!next || e.ts <= next.ts))
+    .sort((a, b) => a.ts.localeCompare(b.ts));
+  return ends[0] ?? null;
+}
+
 export function usagePlan(ledger) {
   const rows = [...ledger].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
   const readings = rows.filter((r) => r.type === 'reading');
   const costs = [];
   for (const run of rows.filter((r) => r.type === 'run')) {
-    const done = rows.find((r) => r.type === 'done' && r.title === run.title && r.ts >= run.ts);
-    if (!done) continue;
+    const done = runEnd(rows, run);
+    if (done?.type !== 'done') continue;
     const overlaps = rows.some((r) => {
       if (r.type !== 'run' || r === run) return false;
-      const rDone = rows.find((d) => d.type === 'done' && d.title === r.title && d.ts >= r.ts);
-      return r.ts < done.ts && (!rDone || rDone.ts > run.ts);
+      const rEnd = runEnd(rows, r);
+      return r.ts < done.ts && (!rEnd || rEnd.ts > run.ts);
     });
     const before = readings.filter((r) => r.ts <= run.ts).at(-1);
     const after = readings.find((r) => r.ts >= done.ts);
@@ -336,4 +350,309 @@ export function bm25Rank(passages, query, { k1 = 1.5, b = 0.75, limit = 8 } = {}
     return { i, score };
   });
   return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit).map((s) => ({ ...passages[s.i], score: +s.score.toFixed(3) }));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Claim-level evidence. The unit of trust is one claim and the source it cites, not a document.
+// `verify sample` writes pending records; a checker who did not write the report fills in the
+// excerpt, the source's own date, the status and any contradictions; `verify score` tallies them.
+
+export const CLAIM_SCHEMA = 'claim-evidence/v1';
+// verified: every material fact in the claim appears in the source. partial: some do, none conflict.
+// unsupported: source reachable, facts absent. contradicted: source states something different.
+// garbled: the claim or its citation is corrupted, so it cannot be checked as written.
+// unreachable: the URL failed after one retry (a 404 on a vendor path may mean an invented URL).
+export const CLAIM_STATUSES = ['pending', 'verified', 'partial', 'unsupported', 'contradicted', 'garbled', 'unreachable'];
+// Hypotheses, not calibrated values: they gate a report's release, never rank it.
+const MAX_FAILED_SHARE = 0.2;
+const MAX_UNREACHABLE_SHARE = 0.3;
+
+const URL_RE = /https?:\/\/[^\s<>()[\]|,"'`]+/g;
+
+// Google Docs markdown escapes punctuation (https\://, www\., \$, \|); undo it before reading text.
+export function unescapeMd(s) {
+  return String(s).replace(/\\([\\`*_{}[\]()#+\-.!|:~$<>&])/g, '$1');
+}
+
+function cleanMd(s) {
+  return unescapeMd(String(s).replace(/\*\*/g, '')).replace(/\s+/g, ' ').trim();
+}
+
+function normUrl(u) {
+  return String(u).replace(/^https?:\/\/(www\.)?/, '').replace(/[/.]+$/, '').toLowerCase();
+}
+
+// The heading must be the whole line, so "## Sources of revenue" is not mistaken for the list.
+const WORKS_CITED_RE = /^#{1,4}\s*\**\s*(?:works cited|sources|references|bibliography)\s*\**\s*:?\s*$/im;
+
+// Numbered "Works cited" entries -> Map(n -> { title, url }).
+export function parseWorksCited(markdown) {
+  const refs = new Map();
+  const start = markdown.search(WORKS_CITED_RE);
+  if (start < 0) return refs;
+  for (const line of markdown.slice(start).split(/\r?\n/)) {
+    const m = line.match(/^\s*>?\s*(\d{1,4})\.\s+(.+)$/);
+    if (!m) continue;
+    const plain = unescapeMd(m[2]);
+    const url = m[2].match(/\]\((https?:\/\/[^)\s]+)\)/)?.[1] ?? plain.match(URL_RE)?.[0];
+    if (!url) continue;
+    refs.set(Number(m[1]), { title: plain.split(/,\s*\[|\[|https?:\/\//)[0].replace(/[,\s]+$/, '').trim(), url });
+  }
+  return refs;
+}
+
+// A Docs export glues superscript citations to the text before them ("tracking6.", "sub)9.",
+// "**2026**59", "Dec 2026110;", "user/mo5."). A run counts only at the end of a sentence, clause
+// or cell, and only after a closing bracket, a closing bold marker, a percent sign, a word of three
+// or more letters ending in lowercase, a unit after a slash, or a 20xx year. So "x402", "v4",
+// "GB10", "GPT5.", "SOC2.", "**4 Nov", "$0.10" and "base64 encoding" survive. A miss (a citation
+// left in the text) is preferred to a false strip: the raw cell is kept beside the cleaned claim.
+const CITE_RE = /(\)|(?<=[\w).%])\*\*|%|[A-Za-z]{2,}[a-z]|(?<=\/)[a-z]{2}|\b20[2-3]\d)(\d{1,3})(?=[.;,:](?:\s|$)|$)/g;
+// Names whose version number follows them directly ("React19,", "IPv6.", "Python3.").
+const VERSIONED = /^(ipv|react|node|next|nuxt|vue|svelte|angular|python|java|php|perl|ruby|rails|django|postgres|postgresql|mysql|redis|ubuntu|debian|fedora|windows|android|chrome|firefox|safari|llama|qwen|gemma|gemini|claude|grok|kimi|mistral|deepseek|opus|sonnet|haiku|tls|http)$/i;
+
+export function splitCitations(text, maxRef = 999) {
+  const refs = [];
+  const clean = String(text).replace(CITE_RE, (all, lead, num) => {
+    const n = Number(num);
+    if (n < 1 || n > maxRef || VERSIONED.test(lead)) return all;
+    refs.push(n);
+    return lead;
+  });
+  return { text: clean, refs };
+}
+
+// Text between two dollar signs that lost its spaces ("$0.25cache),claude-opus-5-5($4") was read as
+// inline math somewhere between the model and the export; its numbers cannot be trusted as written.
+const SPACING_LOST_RE = [/\$[^$\s]{16,}\$/, /\$[\d.,]+[a-z]{3,}/i, /[A-Za-z0-9]\(\$/, /\)[,;]?[a-z]{2,}/, /\d%[A-Za-z]{3,}/];
+
+// Deterministic checks run before any model judges a claim.
+export function claimSignals(claim, { sourceUrls = [], refs = [], worksCited = new Map() } = {}) {
+  const signals = [];
+  if (SPACING_LOST_RE.some((re) => re.test(claim))) signals.push('spacing-lost');
+  if (!sourceUrls.length && !refs.length) signals.push('no-source');
+  if (worksCited.size && sourceUrls.length) {
+    const cited = new Set([...worksCited.values()].map((r) => normUrl(r.url)));
+    if (!cited.has(normUrl(sourceUrls[0]))) signals.push('url-not-in-works-cited');
+    const refUrls = refs.map((n) => worksCited.get(n)?.url).filter(Boolean).map(normUrl);
+    const own = new Set(sourceUrls.map(normUrl));
+    if (refUrls.length && !refUrls.some((u) => own.has(u))) signals.push('ref-differs-from-source-url');
+  }
+  return signals;
+}
+
+function splitRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim());
+}
+
+// Rows of the report's own claims table (the Deep Research prompt asks for one).
+function tableClaims(lines, maxRef) {
+  const out = [];
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const head = lines[i].trim().startsWith('|') ? splitRow(lines[i]).map((c) => cleanMd(c).toLowerCase()) : null;
+    // GFM delimiter row: one or more hyphens per cell, optional colons.
+    if (!head || !/^\|\s*:?-+:?\s*\|/.test(lines[i + 1].trim())) continue;
+    const col = (re) => head.findIndex((h) => re.test(h));
+    const claimCol = col(/claim|finding|metric/);
+    const urlCol = head.findIndex((h, k) => k !== claimCol && /url|source/.test(h));
+    if (claimCol < 0 || urlCol < 0) continue;
+    const dateCol = col(/date|vintage|as of/);
+    const catCol = col(/category|topic|area/);
+    let j = i + 2;
+    for (; j < lines.length && lines[j].trim().startsWith('|'); j += 1) {
+      const cells = splitRow(lines[j]);
+      const { text, refs } = splitCitations(cells[claimCol] ?? '', maxRef);
+      const claim = cleanMd(text);
+      if (!claim) continue;
+      out.push({
+        origin: 'table', category: catCol >= 0 ? cleanMd(cells[catCol] ?? '') : null, claim, claimRaw: cells[claimCol],
+        sourceUrls: [...new Set(unescapeMd(cells[urlCol] ?? '').match(URL_RE) ?? [])],
+        claimedDate: dateCol >= 0 ? cleanMd(splitCitations(cells[dateCol] ?? '', maxRef).text) : null, refs,
+      });
+    }
+    i = j - 1;
+  }
+  return out;
+}
+
+// Prose sentences that end in a citation number, mapped to their Works cited URL.
+function proseClaims(body, worksCited, maxRef) {
+  const out = [];
+  for (const para of body.split(/\n{2,}/)) {
+    const p = para.trim();
+    if (!p || /^(#|\||>|\[image)/.test(p)) continue;
+    for (const sentence of p.split(/(?<=[.!?])\s+(?=[A-Z*])/)) {
+      const { text, refs } = splitCitations(sentence, maxRef);
+      if (!refs.length) continue;
+      out.push({
+        origin: 'prose', category: null, claim: cleanMd(text), claimRaw: sentence,
+        sourceUrls: refs.map((n) => worksCited.get(n)?.url).filter(Boolean), claimedDate: null, refs,
+      });
+    }
+  }
+  return out;
+}
+
+// from: 'auto' (the claims table when the report has one, otherwise cited prose), 'table', 'prose' or 'all'.
+export function extractClaims(markdown, { from = 'auto' } = {}) {
+  const worksCited = parseWorksCited(markdown);
+  const fm = markdown.match(/^---\n[\s\S]*?\n---\n/);
+  const body = markdown.slice(fm ? fm[0].length : 0).split(WORKS_CITED_RE)[0];
+  // The highest number, not the count: an entry without a URL is skipped but keeps its number.
+  const maxRef = worksCited.size ? Math.max(...worksCited.keys()) : 999;
+  const table = from === 'prose' ? [] : tableClaims(body.split(/\r?\n/), maxRef);
+  const prose = from === 'table' || (from === 'auto' && table.length) ? [] : proseClaims(body, worksCited, maxRef);
+  const seen = new Set();
+  return [...table, ...prose].filter((c) => !seen.has(c.claim) && seen.add(c.claim)).map((c) => ({
+    ...c,
+    citedRefs: c.refs.map((n) => ({ n, url: worksCited.get(n)?.url ?? null })),
+    signals: claimSignals(c.claim, { sourceUrls: c.sourceUrls, refs: c.refs, worksCited }),
+  }));
+}
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Seeded, so a sample can be reproduced; round-robin over categories, so one topic cannot fill it.
+export function sampleClaims(claims, n, seed = 1) {
+  const rand = mulberry32(seed);
+  const shuffled = claims.map((c) => [rand(), c]).sort((a, b) => a[0] - b[0]).map(([, c]) => c);
+  const groups = new Map();
+  for (const c of shuffled) {
+    const k = c.category ?? '';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(c);
+  }
+  const queues = [...groups.values()];
+  const want = Math.min(n, claims.length);
+  const out = [];
+  while (out.length < want) for (const q of queues) if (q.length && out.length < want) out.push(q.shift());
+  return out;
+}
+
+function fnv1a(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return h.toString(16).padStart(8, '0');
+}
+
+export function claimRecords(claims, { reportKey, sampledAt, seed }) {
+  return claims.map((c) => ({
+    schema: CLAIM_SCHEMA, id: `${reportKey}#${fnv1a(c.claim)}`, report_key: reportKey, sampled_at: sampledAt, seed,
+    origin: c.origin, category: c.category, claim: c.claim, claim_raw: c.claimRaw,
+    sample_size: claims.length,
+    source_url: c.sourceUrls[0] ?? null, source_urls: c.sourceUrls, cited_refs: c.citedRefs, claimed_date: c.claimedDate,
+    signals: c.signals,
+    status: 'pending', excerpt: null, source_date: null, contradictions: [], checked_at: null, checker: null, method: null, notes: null,
+  }));
+}
+
+export function scoreClaims(records) {
+  const byStatus = Object.fromEntries(CLAIM_STATUSES.map((s) => [s, 0]));
+  for (const r of records) byStatus[CLAIM_STATUSES.includes(r.status) ? r.status : 'pending'] += 1;
+  const checked = records.length - byStatus.pending - byStatus.unreachable;
+  const rate = (x) => (checked ? +(x / checked).toFixed(3) : null);
+  const failed = byStatus.unsupported + byStatus.contradicted + byStatus.garbled;
+  const blocks = [];
+  // An emptied or trimmed file must not pass: every record states how many were sampled.
+  const sampled = Math.max(0, ...records.map((r) => Number(r.sample_size) || 0));
+  if (!records.length) blocks.push('no claim records');
+  else if (records.length < sampled) blocks.push(`${sampled - records.length} sampled record(s) missing from the file`);
+  if (byStatus.contradicted) blocks.push(`${byStatus.contradicted} claim(s) contradicted by the cited source`);
+  if (checked && failed / checked > MAX_FAILED_SHARE) blocks.push(`${failed}/${checked} checked claims unsupported, contradicted or garbled (limit ${MAX_FAILED_SHARE * 100}%)`);
+  if (records.length && byStatus.unreachable / records.length > MAX_UNREACHABLE_SHARE) blocks.push('too many unreachable sources to judge the sample');
+  if (byStatus.pending) blocks.push(`${byStatus.pending} claim(s) not yet checked`);
+  return {
+    total: records.length, checked, byStatus,
+    verifiedRate: rate(byStatus.verified), supportedRate: rate(byStatus.verified + byStatus.partial),
+    release: blocks.length ? 'blocked' : 'pass', blocks,
+  };
+}
+
+export function claimChecklist(records, { reportKey, claimsInReport }) {
+  const out = [
+    `# Claim check: ${reportKey}`, '',
+    `${records.length} of ${claimsInReport} claims, seed ${records[0]?.seed ?? '?'}, sampled ${records[0]?.sampled_at ?? '?'}.`,
+    `Fill the matching record in the .claims.jsonl file (the source of truth). Statuses: ${CLAIM_STATUSES.join(', ')}.`, '',
+  ];
+  records.forEach((r, i) => {
+    out.push(`## ${i + 1}. ${r.category ?? r.origin}`, '', `- Claim: ${r.claim}`, `- Report's date: ${r.claimed_date ?? 'n/a'}`,
+      `- Source: ${r.source_urls.join(' , ') || 'none'}`);
+    if (r.cited_refs.length) out.push(`- Cited refs: ${r.cited_refs.map((c) => `[${c.n}] ${c.url ?? '?'}`).join(' ; ')}`);
+    if (r.signals.length) out.push(`- Signals: ${r.signals.join(', ')}`);
+    out.push(`- [ ] Status: ${r.status}`, '');
+  });
+  return out.join('\n');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pipeline health: the checks that catch silent failures before a scheduled run reports green.
+const HOUR_MS = 3_600_000;
+const LISTING_STALE_H = 36;
+const RUN_STALL_MIN = 90;
+const LAST_RUN_STALE_H = 30;
+const RUN_MAX_MIN = 75; // matches the Task Scheduler limit in register-daily.ps1
+const WINDOW_HOLD_PCT = 90;
+const READING_STALE_H = 5;
+
+// The Usage limits page shows the window reset as local "HH:MM"; readings are taken on this machine,
+// so the next local occurrence after the reading is when that reading stops describing the window.
+export function windowResetAfter(readingTs, hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm ?? '').trim());
+  if (!m) return null;
+  const at = new Date(readingTs);
+  const reset = new Date(at);
+  reset.setHours(Number(m[1]), Number(m[2]), 0, 0);
+  if (reset <= at) reset.setDate(reset.getDate() + 1);
+  return reset.getTime();
+}
+
+function slugOf(key) {
+  return key.split('/').pop().replace(/^\d{4}-\d{2}-\d{2}-/, '');
+}
+
+export function pipelineHealth({ now = Date.now(), corpus = [], quarantineKeys = [], excludedIds = [], listingMtimeMs = null, ledger = [], lastRun = null }) {
+  const findings = [];
+  const add = (check, level, detail) => findings.push({ check, level, detail });
+
+  const blocked = new Set(excludedIds);
+  const qKeys = new Set(quarantineKeys);
+  const leaks = corpus.filter((c) => qKeys.has(c.key) || (c.sourceId && blocked.has(c.sourceId)));
+  if (leaks.length) add('quarantine-leak', 'fail', leaks.map((c) => c.key));
+  const qSlugs = new Set(quarantineKeys.map(slugOf));
+  const twins = corpus.filter((c) => !leaks.includes(c) && qSlugs.has(slugOf(c.key)));
+  if (twins.length) add('quarantine-twin', 'warn', `${twins.length} corpus file(s) share a title with a quarantined one (new Drive id or date?): ${twins.map((c) => c.key).join(', ')}`);
+
+  if (listingMtimeMs === null) add('listing-age', 'warn', 'no Drive listing yet');
+  else if (now - listingMtimeMs > LISTING_STALE_H * HOUR_MS) add('listing-age', 'warn', `Drive listing is ${Math.round((now - listingMtimeMs) / HOUR_MS)}h old`);
+
+  const rows = [...ledger].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  const stalled = rows.filter((r) => r.type === 'run' && now - Date.parse(r.ts) > RUN_STALL_MIN * 60_000 && !runEnd(rows, r));
+  if (stalled.length) add('stalled-runs', 'warn', `${stalled.length} Deep Research run(s) logged without "done" after ${RUN_STALL_MIN} min: close each with "usage done" or "usage abandon --at <when it stopped>", or usage plan treats later runs as overlapping and cannot measure them`);
+
+  const reading = rows.filter((r) => r.type === 'reading').at(-1);
+  const reset = reading ? windowResetAfter(reading.ts, reading.sessionResets) : null;
+  if (!reading) add('usage-reading', 'warn', 'no usage reading; take one before any Deep Research launch');
+  else if ((reset !== null && now >= reset) || now - Date.parse(reading.ts) > READING_STALE_H * HOUR_MS) add('usage-reading', 'warn', 'the window has reset or the reading is old; take a new reading before launching');
+  else if (reading.sessionPct >= WINDOW_HOLD_PCT) add('usage-window', 'warn', `window at ${reading.sessionPct}%: hold launches until ${reading.sessionResets ?? 'reset'}`);
+
+  // scheduled-run.ps1 writes "running" first, so a run killed by the scheduler cannot leave the
+  // previous run's "ok" behind.
+  const runAgeMin = lastRun ? (now - Date.parse(lastRun.ts)) / 60_000 : 0;
+  if (!lastRun) add('last-run', 'warn', 'no scheduled run recorded yet');
+  else if (lastRun.status === 'running' && runAgeMin > RUN_MAX_MIN) add('last-run', 'fail', `scheduled run started ${Math.round(runAgeMin)} min ago and never finished (killed by the scheduler?)`);
+  else if (lastRun.status === 'running') add('last-run', 'warn', 'a scheduled run is in progress');
+  else if (lastRun.status === 'skipped-locked') add('last-run', 'warn', 'last scheduled run skipped: another run held the lock');
+  else if (lastRun.status !== 'ok') add('last-run', 'fail', `last scheduled run ended "${lastRun.status}"`);
+  else if (now - Date.parse(lastRun.ts) > LAST_RUN_STALE_H * HOUR_MS) add('last-run', 'warn', `last scheduled run was ${Math.round((now - Date.parse(lastRun.ts)) / HOUR_MS)}h ago`);
+
+  return { ok: !findings.some((f) => f.level === 'fail'), findings };
 }

@@ -8,11 +8,15 @@ $name = 'StarlightResearchCorpus'
 if ($Remove) { Unregister-ScheduledTask -TaskName $name -Confirm:$false; "removed $name"; return }
 
 $cli = Join-Path $PSScriptRoot 'corpus.mjs'
-$log = Join-Path $HOME '.starlight/research/daily.log'
-# brief runs last and always, so a Drive or R2 failure still leaves agents a fresh model list.
-$script = "node '$cli' list; node '$cli' classify; node '$cli' export; node '$cli' push; node '$cli' brief *>> '$log'"
+$run = Join-Path $PSScriptRoot 'scheduled-run.ps1'
+$log = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.starlight/research/daily.log'
+# scheduled-run.ps1 stops at the first failed step, logs every step and writes runs/last-run.json.
+# brief runs last and always, so a Drive failure still leaves agents a fresh model list.
+# push is left out until a Worker token is provisioned on this machine (owner's decision).
+$script = "& '$run'; node '$cli' brief *>> '$log'"
 $action = New-ScheduledTaskAction -Execute 'pwsh' -Argument "-NoProfile -Command `"$script`""
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
+# 75 min covers four 15-minute steps plus the brief; doctor treats a "running" record older than that as killed.
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 75)
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Settings $settings -Description 'Drive research -> R2 + AI Search; session brief' | Out-Null
 "registered $name daily at $At; heartbeat: ~/.starlight/brief/heartbeat.json"
