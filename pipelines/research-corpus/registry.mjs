@@ -1,28 +1,28 @@
 #!/usr/bin/env node
-// Research registry: one transparent row per corpus report, a role relevance matrix and REGISTRY.md, in two tiers.
+// Research registry: what the research corpus holds and how far each report has been checked, in two tiers.
 //
 //   node registry.mjs build [--allow-unredacted]
 //       corpus front matter + Gemini usage ledger + claim records -> RESEARCH_HOME/registry/
-//         shareable/  reports.csv, reports.jsonl, roles.csv, REGISTRY.md: opaque ids and structural fields only
-//         private/    the same files with titles, corpus keys, paths and Drive links: never share these
+//         shareable/  REGISTRY.md, aggregates.csv, roles.csv: totals and banded counts only
+//         private/    REGISTRY.md, reports.csv, reports.jsonl, roles.csv: one row per report: never share these
 //   node registry.mjs redact-hash "<phrase>" [--label <label>]
 //       prints the line to append to RESEARCH_HOME/registry/redact.sha256.txt
 //
-// Two tiers, because a name denylist can never be complete (look-alike letters from other scripts, new
-// spellings, names nobody listed). The shareable tier carries no text from any report, file name, Drive id or
-// ledger title: each report is an opaque id with enumerated, numeric and date fields (plus the first 12 hex digits of
-// a recorded prompt hash), and before anything is
-// written every shareable word must come from this file's own vocabulary and every character must be printable
-// ASCII, or the build stops. The private tier keeps titles for the operator and is redacted best-effort.
-// Documents excluded by Drive id, quarantine or a private exclusion pattern are withheld from both tiers; only
-// their count is reported.
+// The shareable tier is aggregate-only: no per-report row, id, title, key, path, link, score or run time. It holds
+// totals bucketed by public dimensions (the public domain ids, kind, evidence label, release verdict, verified-rate,
+// sampled-share, age and score bands); a count of 1 to 4 shows as '<5', and further cells are hidden ('-') so no small
+// count can be recovered by subtraction. Score bands use only the public weights in this file; usage cost shows only as
+// a band over at least five measured runs. Before writing, every shareable file must be printable ASCII and use only
+// words this file defines, or the build stops. The private tier keeps per-report rows, exact scores and ledger links.
+// Documents excluded by Drive id, quarantine or the pipeline's exclusion rules are withheld from both tiers, with their
+// ledger runs, costs and claim diagnostics; the shareable tier never states how many.
 //
 // Reads RESEARCH_HOME (corpus/, quarantine/, gemini-usage.jsonl, verify/, exclude.txt, exclude-ids.txt,
 // domains.local.json, registry/weights.local.json, registry/redact.sha256.txt) and writes only
-// RESEARCH_HOME/registry/. The release verdict is the claim gate's own (`corpus.mjs verify score`); the rank
-// only orders review.
+// RESEARCH_HOME/registry/. The release verdict is the claim gate's own (`corpus.mjs verify score`); scores and bands only
+// order review.
 
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -101,17 +101,7 @@ export const ROLES = {
 };
 
 // ---------------------------------------------------------------------------------------------
-// Columns. The private tier adds titles, keys, paths, Drive links, checker names and block reasons; the shareable
-// tier has only the opaque id and fields that are enumerated, numeric or dates.
-export const SHARE_COLUMNS = [
-  'row_id', 'domain', 'kind', 'source', 'created', 'age_days', 'producer', 'producer_mode', 'producer_model', 'producer_model_recorded', 'producer_basis',
-  'prompt_sha12', 'run_started', 'run_finished', 'ledger_run_status', 'ledger_domain', 'cost_basis', 'window_pct_cost', 'weekly_pct_cost',
-  'source_urls', 'source_hosts', 'evidence', 'evidence_basis',
-  'claims_in_report', 'claims_sampled', 'sampled_share', 'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted',
-  'claims_unsupported', 'claims_garbled', 'claims_unreachable', 'claims_pending', 'verified_rate', 'supported_rate',
-  'release', 'release_block_count', 'checked_at', 'checker_recorded', 'claims_backup',
-  'score_evidence_integrity', 'score_source_breadth', 'score_freshness', 'score_verification_coverage', 'score_economic_relevance', 'rank_score',
-];
+// Private columns: one row per report, with titles, keys, paths, Drive links, exact scores and ledger links.
 export const PRIVATE_COLUMNS = [
   'row_id', 'key', 'title', 'domain', 'kind', 'source', 'created', 'age_days',
   'producer', 'producer_mode', 'producer_model', 'producer_basis', 'prompt_sha256', 'prompt_bytes',
@@ -121,45 +111,37 @@ export const PRIVATE_COLUMNS = [
   'claims_unsupported', 'claims_garbled', 'claims_unreachable', 'claims_pending', 'verified_rate', 'supported_rate',
   'release', 'release_block_count', 'release_blocks', 'checker', 'checked_at', 'claims_backup', 'privacy',
   'score_evidence_integrity', 'score_source_breadth', 'score_freshness', 'score_verification_coverage', 'score_economic_relevance', 'rank_score',
+  'score_band',
 ];
-export const SHARE_ROLE_COLUMNS = ['row_id', 'domain', 'kind', 'evidence', 'release', ...Object.keys(ROLES), 'human_reader', 'agent_reader'];
 export const PRIVATE_ROLE_COLUMNS = ['row_id', 'key', 'title', 'domain', 'kind', 'evidence', 'release', ...Object.keys(ROLES), 'human_reader', 'agent_reader'];
 
+// ---------------------------------------------------------------------------------------------
 // The public schema of the shareable tier, defined here and nowhere else: private configuration (domains.local.json,
-// weights.local.json) can never add a word to it. Domain ids mirror the public domains.json (a test keeps the two
-// in step); any other id, including every private one, is written as 'other'.
+// weights.local.json) can never add a word, a bucket or a weight to it. Domain ids mirror the public domains.json (a
+// test keeps the two in step); any other id, including every private one, is counted under 'other'.
 export const PUBLIC_DOMAIN_IDS = Object.freeze([
   'agentic-income-streams', 'ai-models-platforms', 'github-ecosystem', 'digital-product-design', 'web-design', 'marketing',
   'community', 'solana', 'ethereum', 'bitcoin', 'web3-general', 'publishing-books', 'music-media', 'human-potential',
   'business-strategy', 'unrouted',
 ]);
 const PUBLIC_DOMAINS = new Set(PUBLIC_DOMAIN_IDS.filter((d) => /^[a-z0-9-]+$/.test(d)));
-
-// The values a shareable enumerated field may take; anything else is written as 'other'.
 const OTHER = 'other';
 const ENUMS = {
   kind: ['deep-research', 'gemini-canvas', 'estate-doc', 'platform-catalog', 'unknown'],
-  source: ['google-drive', 'local-file', 'live-catalogs', 'unknown'],
-  producer: ['gemini-deep-research', 'gemini-chat', 'unknown'],
-  // Model and mode labels as `usage run --model/--mode` recorded them, lowercased with spaces as '-'. A label not
-  // listed here is written as 'other'; extend the list when the app shows a new one.
-  producer_mode: ['deep-research', 'deep-think', 'canvas', 'chat', 'unknown'],
-  producer_model: ['gemini-3-pro', 'gemini-3-flash', 'gemini-3-deep-think', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-deep-think', 'unknown'],
-  producer_basis: ['usage-ledger', 'front-matter-classifier', 'none'],
-  ledger_run_status: ['done', 'abandoned', 'open'],
-  cost_basis: ['no-ledger', 'no-ledger-run', 'measured', 'not-measured', 'ambiguous-repeated-title'],
   evidence: ['cited', 'uncited'],
-  evidence_basis: ['front-matter', 'computed-by-registry'],
   release: ['pass', 'blocked', 'unsampled'],
-  claims_backup: ['none', 'identical', 'differs', 'backup-only'],
 };
-const SHARE_NUMBERS = [
-  'age_days', 'window_pct_cost', 'weekly_pct_cost', 'source_urls', 'source_hosts', 'claims_in_report', 'claims_sampled', 'sampled_share',
-  'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted', 'claims_unsupported', 'claims_garbled',
-  'claims_unreachable', 'claims_pending', 'verified_rate', 'supported_rate', 'release_block_count',
-  'score_evidence_integrity', 'score_source_breadth', 'score_freshness', 'score_verification_coverage', 'score_economic_relevance',
-];
-const SHARE_DATES = ['created', 'run_started', 'run_finished', 'checked_at'];
+// Every bucket a banded dimension can take, fixed in advance so the set of buckets never depends on the data.
+export const BANDS = {
+  verified_rate: ['under 50%', '50-69%', '70% or more', 'unsampled'],
+  sampled_share: ['under 10%', '10-24%', '25-49%', '50% or more', 'unsampled'],
+  age: ['0-7 days', '8-30 days', '31-90 days', '91-365 days', 'over 365 days', 'unknown'],
+  score: ['A', 'B', 'C', 'unranked'],
+  window: ['under 25%', '25-49%', '50-74%', '75% or more'],
+  weekly: ['under 2%', '2-4%', '5-9%', '10% or more'],
+};
+export const AGG_COLUMNS = ['dimension', 'bucket', 'reports'];
+export const ROLE_AGG_COLUMNS = ['role', 'domain', 'reports_relevance_2_plus'];
 
 // How a person and an agent should consume a report, by what has been checked, not by topic. A pass licenses
 // citing only the sampled claims a checker verified, never the report as a whole: a partial claim carries details
@@ -181,26 +163,23 @@ export function readers(row) {
   return row.kind === 'deep-research' ? READERS.uncited : READERS.notes;
 }
 
-// Every word REGISTRY.md may contain in either tier, beyond values, ids, numbers and dates. ASCII only.
+// Every word REGISTRY.md may contain in either tier, beyond values, numbers and dates. ASCII only.
 const TEXT = {
   headPrivate: '# Research registry: PRIVATE tier',
-  headShare: '# Research registry: shareable tier',
-  notePrivate: '> **Private: do not share.** This tier holds titles, corpus keys, file paths and Drive links. Names are redacted against the private name list on a best-effort basis only: look-alike letters from another script, and a name glued to the next word by an invisible character, are not caught. Share `registry/shareable/` instead.',
-  noteShare: '> **Shareable.** This tier holds no titles, file paths, corpus keys, Drive ids or links, and no text taken from a report or a ledger title. Each report is an opaque id (the first 12 hex digits of the SHA-256 of its corpus key) with enumerated, numeric and date fields only. Before writing, every character was checked to be printable ASCII and every word to be in the registry vocabulary; anything else stops the build.',
-  hypotheses: '> **Weights are hypotheses.** The rank score only orders what to review next; it never releases a report. Release comes only from the claim gate (`node corpus.mjs verify score <key>`): `pass` or `blocked`. '
+  notePrivate: '> **Private: do not share.** This tier holds titles, corpus keys, file paths, Drive links, exact scores and ledger links. `row_id` is the first 12 hex digits of the SHA-256 of the corpus key, so anyone who guesses a key can confirm it: the id is as private as the key. Names are redacted against the private name list on a best-effort basis only: look-alike letters from another script, and a name glued to the next word by an invisible character, are not caught. Share `registry/shareable/` instead.',
+  hypotheses: '> **Weights are hypotheses.** Scores and score bands only order what to review next; they never release a report. Release comes only from the claim gate (`node corpus.mjs verify score <key>`): `pass` or `blocked`. '
     + `A pass needs at least ${Math.round(MIN_VERIFIED_RATE * 100)}% of checked claims verified, and it licenses citing only the sampled claims a checker verified, never the report as a whole. `
     + 'A report with no claim records is `unsampled`, and its rank is `unranked`.',
-  built: 'Built {at} from {n} corpus reports; {w} excluded, withheld (excluded by Drive id, quarantine or the pipeline exclusion rules: no row, ledger run, cost or claim diagnostic in either tier). reports.csv and reports.jsonl hold every column of this tier; roles.csv holds the role relevance matrix; all three share `row_id`, a pseudonym keyed by a private salt.',
-  aFew: 'a few',
+  built: 'Built {at} from {n} corpus reports; {w} excluded, withheld (excluded by Drive id, quarantine or the pipeline exclusion rules: no row, ledger run, cost or claim diagnostic in either tier). reports.csv and reports.jsonl hold every column of this tier; roles.csv holds the role relevance matrix per report; all three share `row_id`.',
   paths: 'Paths are relative to RESEARCH_HOME.',
   checkedPrivate: 'Name check: every private output was scanned against {d} hashed name phrase(s) and {p} private exclusion pattern(s) before writing; a hit stops the build. Matches show as [redacted].',
   uncheckedPrivate: '**Not checked for personal names:** built with --allow-unredacted and no redaction list.',
-  checkedShare: 'Structure check: printable ASCII only, and no word outside the registry vocabulary.',
+  checkedShare: 'Structure check: printable ASCII only, and no word the registry does not define.',
   hSummary: '## Summary', hWeights: '## Weights (hypotheses)', hRanked: '## Ranked: claim-sampled reports',
   hQueue: '## Next to sample: unsampled reports with cited evidence',
   queueNote: 'Ordered by the three sub-scores that need no claim checks (breadth, freshness, economic relevance). This is a sampling queue, not a rank.',
   hLedger: '## Gemini usage ledger', hProblems: '## Problems found', hRoles: '## Roles: reports at relevance 2 or more', hAll: '## All reports',
-  none: '- None.', na: 'n/a', local: '(local)', withheld: 'withheld',
+  none: '- None.', na: 'n/a', local: '(local)',
   noLedger: 'No usage ledger was found, so run timing and cost columns are blank.',
   measured: 'Measured runs: {n}. Mean cost per measured run: window {s}, weekly {w}. A run is measured only when it is the only run between the readings around it and no meter reset falls inside (rules: README, "Gemini usage").',
   econ: 'Economic domain weights: {list}. Unlisted domains weigh 0.',
@@ -214,7 +193,7 @@ const TEXT = {
     release: 'Release', vci: 'Verified / checked / in report', share: 'Sampled share', integrity: 'Integrity', breadth: 'Breadth',
     fresh: 'Fresh', coverage: 'Coverage', econ: 'Econ', blocks: 'Blocks', kind: 'Kind', hosts: 'Hosts', evidence: 'Evidence', role: 'Role',
     rel2: 'Relevance >= 2', rel3: 'Relevance 3', runTitle: 'Run title', ledgerDomain: 'Ledger domain', status: 'Status',
-    started: 'Started', finished: 'Finished', matched: 'Matched report',
+    started: 'Started', finished: 'Finished', matched: 'Matched report', band: 'Band',
   },
   component: { integrity: 'Evidence integrity', breadth: 'Source breadth', freshness: 'Freshness', coverage: 'Verification coverage', economic: 'Economic relevance' },
   rule: {
@@ -224,9 +203,31 @@ const TEXT = {
     coverage: 'min(1, checked claims / claims in report across all extraction modes); blank when unsampled',
     economic: 'domain weight * max; the per-domain weights are configuration, never keywords',
   },
-  econPrivateOnly: 'The per-domain economic weights are private configuration and are listed only in the private tier.',
+  bandNote: 'Score band (both tiers): computed from the public weights in registry.mjs only, never from private configuration: A 70-100, B 40-69, C 0-39; `unranked` means no claim records.',
+  share: {
+    title: '# Research registry: shareable tier (aggregates only)',
+    note: '> **Shareable.** This tier holds totals and banded counts only: no per-report row or id, no title, file path, corpus key, Drive id or link, no per-report score, and no text from a report or the usage ledger. A count of 1 to 4 shows as `<5`; when a table has one, further cells show as `hidden` so that no small count can be recovered by subtraction from the total. Before writing, every character was checked to be printable ASCII and every word to be defined by the registry; anything else stops the build.',
+    built: 'Built {day}.',
+    withheld: 'Documents excluded by Drive id, quarantine or the pipeline exclusion rules, if any, are withheld from every count in this tier, together with their usage-ledger runs and costs; their number is not stated.',
+    hTotals: '## Totals', total: 'Reports counted: {n}.',
+    hDims: '## Reports by public dimension',
+    dims: {
+      domain: 'Domain id (public ids; every other id counts as other)', kind: 'Kind', evidence: 'Evidence label (cited: at least 10 URLs and 5 hosts)',
+      release: 'Release verdict', verified_rate: 'Verified-rate band', sampled_share: 'Sampled-share band (sampled claims / claims in report)',
+      age: 'Age band (days since the report was created)', score: 'Score band',
+    },
+    hCost: '## Usage cost',
+    cost: 'Mean cost per measured Deep Research run over the whole usage ledger: window {s}, weekly {w}. Bands only; never per run.',
+    costInsufficient: 'Insufficient data: fewer than 5 measured runs. No per-run times or costs are published.',
+    noLedger: 'No usage ledger.',
+    hRoles: '## Roles: reports at relevance 2 or more',
+    rolesNote: 'Relevance uses the public role rules in registry.mjs only. roles.csv splits each role by public domain id, with the same masking.',
+    diagnostics: 'Pipeline diagnostics are in the private tier.',
+    head: { bucket: 'Bucket', reports: 'Reports', role: 'Role', rel2: 'Relevance >= 2', rel3: 'Relevance 3' },
+  },
 };
 
+// Pipeline diagnostics: private tier only.
 const PROBLEMS = {
   noManifest: 'claims file(s) have no sampling manifest, so the gate blocks them until resampled with `verify sample <key> --force`',
   unreadable: 'claims file(s) could not be read; their reports are blocked',
@@ -374,51 +375,101 @@ function redactRow(row, redact) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Shareable tier: a whitelist projection. Each field is an enum value, a finite number, an ISO date, a configured
-// domain id or the opaque id; nothing is copied as text. The scan below checks the rendered files again.
-const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?Z)?$/;
-const enumOf = (field, v) => (v === null || v === undefined ? null : ENUMS[field].includes(v) ? v : OTHER);
-const dateOf = (v) => (typeof v === 'string' && ISO_RE.test(v) ? v : null);
-const numOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-const domainOf = (v) => (v === null || v === undefined ? null : PUBLIC_DOMAINS.has(v) ? v : OTHER);
-const OPAQUE_ID_RE = /^[0-9a-f]{12}$/;
-// A free-text label (model or mode as the app showed it) becomes an enum value or 'other', never text: lowercased,
-// runs of other characters as '-', and a bare model label ("3 Pro") tried with the 'gemini-' prefix.
-function labelOf(field, v) {
-  if (v === null || v === undefined) return null;
-  const slug = String(v).toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
-  return [slug, `gemini-${slug}`].find((s) => ENUMS[field].includes(s)) ?? OTHER;
+// Shareable tier: aggregates only. Every count is a number of kept reports in one bucket of one public dimension;
+// nothing per report, per run or from private configuration is written.
+const enumOf = (field, v) => (ENUMS[field].includes(v) ? v : OTHER);
+const domainOf = (v) => (PUBLIC_DOMAINS.has(v) ? v : OTHER);
+
+// Small-count protection. A count of 1 to 4 shows as '<5'. In a table whose cells add up to a published total, a
+// masked cell could be recovered by subtraction, so further cells are hidden ('hidden'), smallest first, until at
+// least two cells are hidden and the hidden counts add up to at least 10; when that cannot be reached, every non-zero
+// cell is hidden.
+const SMALL = 5;
+const HIDDEN_SUM_MIN = 10;
+const MASK_SMALL = '<5';
+const MASK_HIDDEN = 'hidden';
+export const maskCount = (n) => (n > 0 && n < SMALL ? MASK_SMALL : String(n));
+
+export function protectCounts(counts) {
+  const small = counts.filter(([, n]) => n > 0 && n < SMALL);
+  if (!small.length) return counts.map(([b, n]) => [b, String(n)]);
+  const hidden = new Set(small.map(([b]) => b));
+  let sum = small.reduce((s, [, n]) => s + n, 0);
+  const visible = counts.filter(([, n]) => n >= SMALL).sort((a, b) => a[1] - b[1]);
+  while ((hidden.size < 2 || sum < HIDDEN_SUM_MIN) && visible.length) {
+    const [b, n] = visible.shift();
+    hidden.add(b);
+    sum += n;
+  }
+  const safe = hidden.size >= 2 && sum >= HIDDEN_SUM_MIN;
+  const shown = (b, n) => (n === 0 ? '0' : !safe ? MASK_HIDDEN : !hidden.has(b) ? String(n) : n < SMALL ? MASK_SMALL : MASK_HIDDEN);
+  return counts.map(([b, n]) => [b, shown(b, n)]);
 }
 
-export function shareRow(row) {
-  const out = { row_id: OPAQUE_ID_RE.test(row.row_id) ? row.row_id : null, domain: domainOf(row.domain), ledger_domain: domainOf(row.ledger_domain) };
-  for (const f of Object.keys(ENUMS)) out[f] = enumOf(f, row[f]);
-  for (const f of SHARE_DATES) out[f] = dateOf(row[f]);
-  for (const f of SHARE_NUMBERS) out[f] = numOf(row[f]);
-  out.rank_score = row.rank_score === 'unranked' ? 'unranked' : numOf(row.rank_score);
-  out.producer_model = labelOf('producer_model', row.producer_model);
-  out.producer_mode = labelOf('producer_mode', row.producer_mode);
-  out.prompt_sha12 = typeof row.prompt_sha256 === 'string' && /^[0-9a-f]{64}$/.test(row.prompt_sha256) ? row.prompt_sha256.slice(0, 12) : null;
-  out.producer_model_recorded = row.producer_model && row.producer_model !== 'unknown' ? 'yes' : 'no';
-  out.checker_recorded = row.release === 'unsampled' ? null : row.checker ? 'yes' : 'no';
-  return Object.fromEntries(SHARE_COLUMNS.map((c) => [c, out[c] ?? null]));
+const B = BANDS;
+const verifiedBand = (r) => (r.release === 'unsampled' || typeof r.verified_rate !== 'number' ? B.verified_rate[3]
+  : r.verified_rate < 0.5 ? B.verified_rate[0] : r.verified_rate < 0.7 ? B.verified_rate[1] : B.verified_rate[2]);
+const sampledBand = (r) => (typeof r.sampled_share !== 'number' ? B.sampled_share[4]
+  : r.sampled_share < 0.1 ? B.sampled_share[0] : r.sampled_share < 0.25 ? B.sampled_share[1] : r.sampled_share < 0.5 ? B.sampled_share[2] : B.sampled_share[3]);
+const ageBand = (r) => (typeof r.age_days !== 'number' ? B.age[5]
+  : r.age_days <= 7 ? B.age[0] : r.age_days <= 30 ? B.age[1] : r.age_days <= 90 ? B.age[2] : r.age_days <= 365 ? B.age[3] : B.age[4]);
+const windowBand = (x) => (x < 25 ? B.window[0] : x < 50 ? B.window[1] : x < 75 ? B.window[2] : B.window[3]);
+const weeklyBand = (x) => (x < 2 ? B.weekly[0] : x < 5 ? B.weekly[1] : x < 10 ? B.weekly[2] : B.weekly[3]);
+
+// The score band uses public inputs only: the public economic weights in this file, and the refresh windows of the
+// public domains.json. A private domain id scores as unlisted; private weights and role bases never enter.
+export function publicScoreBand(row, publicStale = new Map()) {
+  if (row.release === 'unsampled') return B.score[3];
+  const domain = PUBLIC_DOMAINS.has(row.domain) ? row.domain : null;
+  const staleDays = (domain && publicStale.get(domain)) || DEFAULT_STALE_DAYS;
+  const { rank_score: score } = scoreColumns(row, { staleDays, econWeight: domain ? ECONOMIC_DOMAIN_WEIGHTS[domain] ?? 0 : 0 });
+  return score >= 70 ? B.score[0] : score >= 40 ? B.score[1] : B.score[2];
 }
 
-// The words the shareable tier may contain, all defined in this file: its fixed text, column names, enum values,
-// role ids, reader phrases and the public domain ids. Nothing from private configuration or the corpus is added.
-// Numbers, ISO date pieces and opaque ids are allowed by shape; JSON's null is allowed for empty fields.
+const DIMENSIONS = [
+  { id: 'domain', buckets: [...PUBLIC_DOMAIN_IDS, OTHER], of: (r) => domainOf(r.domain) },
+  { id: 'kind', buckets: [...ENUMS.kind, OTHER], of: (r) => enumOf('kind', r.kind) },
+  { id: 'evidence', buckets: [...ENUMS.evidence, OTHER], of: (r) => enumOf('evidence', r.evidence) },
+  { id: 'release', buckets: ENUMS.release, of: (r) => r.release },
+  { id: 'verified_rate', buckets: B.verified_rate, of: verifiedBand },
+  { id: 'sampled_share', buckets: B.sampled_share, of: sampledBand },
+  { id: 'age', buckets: B.age, of: ageBand },
+  { id: 'score', buckets: B.score, of: (r) => r.score_band },
+];
+
+// Usage cost for the shareable tier: a band of the mean over the kept measured runs, and only over at least five.
+const MIN_RUNS_FOR_COST = 5;
+function costLine(plan, ledgerPresent) {
+  if (!ledgerPresent) return TEXT.share.noLedger;
+  if (!plan || plan.measuredRuns < MIN_RUNS_FOR_COST) return TEXT.share.costInsufficient;
+  return fmt(TEXT.share.cost, { s: windowBand(plan.sessionPerRun), w: weeklyBand(plan.weeklyPerRun) });
+}
+
+// items: [{ row, relevance }] for the kept reports, relevance from the public role rules only.
+export function aggregateTables(items, { plan = null, ledgerPresent = false } = {}) {
+  const count = (pred) => items.filter(pred).length;
+  const dims = DIMENSIONS.map((d) => ({ id: d.id, cells: protectCounts(d.buckets.map((b) => [b, count(({ row }) => d.of(row) === b)])) }));
+  const roles = Object.keys(ROLES).map((role) => {
+    const relevant = items.filter(({ relevance }) => relevance[role] >= 2);
+    return {
+      role, rel2: maskCount(relevant.length), rel3: maskCount(count(({ relevance }) => relevance[role] === 3)),
+      byDomain: protectCounts([...PUBLIC_DOMAIN_IDS, OTHER].map((d) => [d, relevant.filter(({ row }) => domainOf(row.domain) === d).length])),
+    };
+  });
+  return { total: maskCount(items.length), dims, roles, cost: costLine(plan, ledgerPresent) };
+}
+
+// The words the shareable tier may contain, all defined in this file. Nothing from private configuration, the
+// corpus or the ledger is added; numbers are allowed by shape.
 export function shareVocabulary() {
-  const sources = [TEXT, PROBLEMS, READERS, ENUMS, SHARE_COLUMNS, SHARE_ROLE_COLUMNS, Object.keys(ROLES), PUBLIC_DOMAIN_IDS,
-    [OTHER, 'unranked', 'yes', 'no', 'null']];
+  const sources = [TEXT, BANDS, ENUMS, AGG_COLUMNS, ROLE_AGG_COLUMNS, Object.keys(ROLES), PUBLIC_DOMAIN_IDS, Object.values(TOTAL_ROW), [OTHER, MASK_HIDDEN]];
   return new Set(JSON.stringify(sources).toLowerCase().match(/[a-z0-9]+/g));
 }
-
-const SHAPE_RE = /^(\d+|\d+[tz]\d*|[0-9a-f]{12})$/;
 
 // Counts only, never the offending text: an error message must not repeat what it refuses to write.
 export function shareableScan(text, vocabulary) {
   const nonAscii = (String(text).match(/[^\t\n\r\x20-\x7e]/g) ?? []).length;
-  const unknownWords = (String(text).match(/[A-Za-z0-9]+/g) ?? []).filter((w) => !vocabulary.has(w.toLowerCase()) && !SHAPE_RE.test(w.toLowerCase())).length;
+  const unknownWords = (String(text).match(/[A-Za-z0-9]+/g) ?? []).filter((w) => !vocabulary.has(w.toLowerCase()) && !/^\d+$/.test(w)).length;
   return { nonAscii, unknownWords, ok: nonAscii === 0 && unknownWords === 0 };
 }
 
@@ -476,6 +527,13 @@ function titlesOverlap(reportTitle, runTitle) {
   return t.split(' ').length >= MIN_TITLE_WORDS && (` ${r} `.includes(` ${t} `) || ` ${t} `.includes(` ${r} `));
 }
 
+// The same normalized title, at any length: an excluded report claims every ledger run and close record so titled,
+// however short its title is.
+function sameTitle(a, b) {
+  const x = phraseOf(a);
+  return x !== '' && x === phraseOf(b);
+}
+
 // The report was created between the run's start and its end (or the open-run span) plus the grace.
 function inRunWindow(created, run) {
   const start = Date.parse(run.started);
@@ -498,16 +556,17 @@ export function matchRun(report, runs) {
   return hits.sort((a, b) => Math.abs(created - endOf(a)) - Math.abs(created - endOf(b)))[0] ?? null;
 }
 
-// Runs that belong to excluded reports, in any status: every run whose title overlaps an excluded report's, and every
-// run in the excluded report's domain whose window holds its creation time, unless that run's title matches a kept
-// report. They are dropped before any ledger table, count or cost average is computed.
+// Runs that belong to excluded reports (including quarantined documents no longer in corpus/), in any status: every run
+// with the same normalized title at any length, every run whose title overlaps an excluded report's, every run closed
+// with its Drive id, and every run in its domain whose window holds its creation time unless that run's title matches
+// a kept report. They are dropped before any ledger table, count, cost band or aggregate is computed.
 export function excludedRuns(runs, excluded, kept) {
   const keptRuns = new Set(kept.map((f) => matchRun(f, runs)).filter(Boolean));
   const dropped = new Set();
   for (const f of excluded) {
     const created = Date.parse(f.created);
     for (const run of runs) {
-      const byTitle = titlesOverlap(f.title, run.title);
+      const byTitle = sameTitle(f.title, run.title) || titlesOverlap(f.title, run.title);
       const byDoc = Boolean(f.driveId && run.docId === f.driveId);
       const byDomainTime = !keptRuns.has(run) && run.domain === f.domain && !Number.isNaN(created) && inRunWindow(created, run);
       if (byTitle || byDoc || byDomainTime) dropped.add(run);
@@ -637,8 +696,8 @@ function headingsOf(body) {
 
 // ---------------------------------------------------------------------------------------------
 // The registry: pure, so every rule above is testable on synthetic data. Exclusion is decided first, over every
-// report, and excluded documents are dropped before any row, ledger run, cost average, count or claim diagnostic
-// is computed, so neither tier can carry them.
+// report and every quarantined document, and excluded documents are dropped before any row, ledger run, cost average,
+// count, aggregate or claim diagnostic is computed, so neither tier can carry them.
 
 // The pipeline's own exclusion test (lib.mjs classifyKind): a title containing a personal pattern (the defaults
 // plus exclude.txt, as a case-insensitive substring) is 'personal'; one matching SENSITIVE_RE is 'sensitive'.
@@ -653,14 +712,14 @@ function isExcluded({ key, f }, { quarantineKeys, personalPatterns, redact }) {
     || redact(`${f.title}\n${key}`).hits.has('exclusion');
 }
 
-// Row ids are a pseudonym keyed by a private salt, so a reader who can guess a corpus key cannot confirm it.
-export const rowIdFor = (key, salt) => createHmac('sha256', String(salt)).update(String(key)).digest('hex').slice(0, 12);
-const freshSalt = () => randomBytes(32).toString('hex');
+// The private row id: the first 12 hex digits of the SHA-256 of the corpus key. Anyone who guesses a key can
+// confirm it, so the id appears only in the private tier.
+const rowIdOf = (key) => sha256(key).slice(0, 12);
 
 function reportRow(f, key, text, run, ctx) {
   const created = Date.parse(f.created);
   const raw = {
-    row_id: rowIdFor(key, ctx.idSalt), key, title: f.title, domain: f.domain, kind: f.kind, source: f.source,
+    row_id: rowIdOf(key), key, title: f.title, domain: f.domain, kind: f.kind, source: f.source,
     created: f.created, age_days: Number.isNaN(created) ? null : Math.max(0, Math.floor((ctx.now - created) / DAY_MS)),
     producer: f.producer ?? (run ? 'gemini-deep-research' : 'unknown'),
     // The usage ledger, when the run recorded them, is the authority for model and mode; never invented.
@@ -675,61 +734,69 @@ function reportRow(f, key, text, run, ctx) {
   };
   raw.release_block_count = raw.release_blocks.length;
   raw.sampled_share = raw.claims_in_report ? +(raw.claims_sampled / raw.claims_in_report).toFixed(3) : null;
-  return Object.assign(raw, scoreColumns(raw, { staleDays: ctx.stale.get(f.domain) ?? DEFAULT_STALE_DAYS, econWeight: ctx.econ[f.domain] ?? 0 }));
+  Object.assign(raw, scoreColumns(raw, { staleDays: ctx.stale.get(f.domain) ?? DEFAULT_STALE_DAYS, econWeight: ctx.econ[f.domain] ?? 0 }));
+  raw.score_band = publicScoreBand(raw, ctx.publicStale);
+  return raw;
 }
 
+const staleMap = (domains, only = null) => {
+  const out = new Map();
+  for (const d of domains) if (!out.has(d.id) && (!only || only.has(d.id))) out.set(d.id, d.staleDays);
+  return out;
+};
+
 export function buildRegistry({
-  reports, ledger = null, claimSets = new Map(), domains = [], local = {}, exclusionIds = new Set(), quarantineKeys = new Set(),
-  personalPatterns = DEFAULT_PERSONAL_PATTERNS, redact = makeRedactor(), now = Date.now(), orphanClaimFiles = [], idSalt = freshSalt(),
+  reports, ledger = null, claimSets = new Map(), domains = [], publicDomains = domains, local = {}, exclusionIds = new Set(),
+  quarantineKeys = new Set(), quarantineReports = [], personalPatterns = DEFAULT_PERSONAL_PATTERNS, redact = makeRedactor(),
+  now = Date.now(), orphanClaimFiles = [],
 }) {
-  const stale = new Map();
-  for (const d of domains) if (!stale.has(d.id)) stale.set(d.id, d.staleDays);
+  const stale = staleMap(domains);
+  const publicStale = staleMap(publicDomains, PUBLIC_DOMAINS);
   const econ = { ...ECONOMIC_DOMAIN_WEIGHTS, ...(local.economicDomainWeights ?? {}) };
+  const qKeys = new Set([...quarantineKeys, ...quarantineReports.map((r) => r.key)]);
   const all = [...reports].sort((a, b) => a.key.localeCompare(b.key)).map(({ key, text }) => ({ key, text, f: reportFacts(key, text, exclusionIds) }));
-  const excluded = all.filter((r) => isExcluded(r, { quarantineKeys, personalPatterns, redact }));
+  const excluded = all.filter((r) => isExcluded(r, { quarantineKeys: qKeys, personalPatterns, redact }));
   const kept = all.filter((r) => !excluded.includes(r));
+  // A quarantined document normally leaves corpus/, but its front matter still identifies its ledger runs.
+  const corpusKeys = new Set(all.map((r) => r.key));
+  const quarantined = quarantineReports.filter((r) => !corpusKeys.has(r.key)).map(({ key, text }) => reportFacts(key, text, exclusionIds));
+  const excludedFacts = [...excluded.map((r) => r.f), ...quarantined];
   const ledgerFacts = ledger ? ledgerRuns(ledger) : { runs: [], orphanCloseTitles: [] };
-  const dropped = excludedRuns(ledgerFacts.runs, excluded.map((r) => r.f), kept.map((r) => r.f));
+  const dropped = excludedRuns(ledgerFacts.runs, excludedFacts, kept.map((r) => r.f));
   const runs = ledgerFacts.runs.filter((r) => !dropped.has(r));
-  const orphanCloses = ledgerFacts.orphanCloseTitles.filter((t) => !excluded.some((r) => titlesOverlap(r.f.title, t))).length;
+  const ownedByExcluded = (t) => excludedFacts.some((f) => sameTitle(f.title, t) || titlesOverlap(f.title, t));
+  const orphanCloses = ledgerFacts.orphanCloseTitles.filter((t) => !ownedByExcluded(t)).length;
   const plan = ledger ? keptPlan(ledger, dropped) : null;
   const keptKeys = new Set(kept.map((r) => r.key));
   const keptSets = new Map([...claimSets].filter(([k]) => keptKeys.has(k)));
-  const ctx = { ledgerPresent: Boolean(ledger), costs: plan?.costs ?? [], runs, now, stale, econ, claimSets: keptSets, idSalt };
-  const out = { rows: [], roleRows: [], shareRows: [], shareRoleRows: [] };
+  const ctx = { ledgerPresent: Boolean(ledger), costs: plan?.costs ?? [], runs, now, stale, publicStale, econ, claimSets: keptSets };
+  const out = { rows: [], roleRows: [] };
+  const items = [];
   const matched = new Map();
   for (const { key, text, f } of kept) {
     const run = matchRun(f, runs);
     const raw = reportRow(f, key, text, run, ctx);
     if (run) matched.set(run, raw);
-    const relevance = roleRelevance(f.domain, { title: f.title, headings: headingsOf(f.body) }, local.roleDomains);
+    const signals = { title: f.title, headings: headingsOf(f.body) };
+    const relevance = roleRelevance(f.domain, signals, local.roleDomains);
+    // The aggregates take relevance from the public role rules only, never from private role bases.
+    items.push({ row: raw, relevance: roleRelevance(f.domain, signals) });
     const [human, agent] = readers(raw);
-    const share = shareRow(raw);
-    out.shareRows.push(share);
-    out.shareRoleRows.push({ row_id: share.row_id, domain: share.domain, kind: share.kind, evidence: share.evidence, release: share.release,
-      ...relevance, human_reader: human, agent_reader: agent });
     const { row, hits } = redactRow(raw, redact);
     row.privacy = hits.has('denylist') ? 'redacted' : 'ok';
     out.rows.push(Object.fromEntries(PRIVATE_COLUMNS.map((c) => [c, row[c] ?? null])));
     out.roleRows.push({ row_id: row.row_id, key: row.key, title: row.title, domain: row.domain, kind: row.kind,
       evidence: row.evidence, release: row.release, ...relevance, human_reader: human, agent_reader: agent });
   }
-  const reportOf = (r, idOf) => (matched.has(r) ? idOf(matched.get(r)) : null);
-  const runRows = runs.map((r) => ({ ...r, title: redact(r.title).text, report: reportOf(r, (raw) => redact(raw.key, 'redacted').text) }));
-  const shareRuns = runs.map((r) => ({ domain: domainOf(r.domain), status: enumOf('ledger_run_status', r.status),
-    started: dateOf(r.started), finished: dateOf(r.finished), report: reportOf(r, (raw) => raw.row_id) }));
+  const runRows = runs.map((r) => ({ ...r, title: redact(r.title).text, report: matched.has(r) ? redact(matched.get(r).key, 'redacted').text : null }));
   // A claims file left by an excluded or quarantined report is not reported as an orphan either.
-  const excludedStems = new Set([...excluded.map((r) => r.key), ...quarantineKeys].map(stemOf));
+  const excludedStems = new Set([...excluded.map((r) => r.key), ...qKeys].map(stemOf));
   const orphans = orphanClaimFiles.filter((name) => !excludedStems.has(name.replace(/\.claims\.jsonl$/, '')));
   const problems = findProblems({ rows: out.rows, runRows, orphanCloses, claimSets: keptSets, orphanClaimFiles: orphans, econ,
     withheld: excluded.length, ledgerPresent: Boolean(ledger) });
-  return { ...out, runRows, shareRuns, plan, problems, econ, withheld: excluded.length };
+  const aggregates = aggregateTables(items, { plan, ledgerPresent: Boolean(ledger) });
+  return { ...out, runRows, plan, problems, econ, withheld: excluded.length, aggregates };
 }
-
-// Problems are counts with fixed text. The withheld count is the one that can point at a document, so the
-// shareable tier shows it as "a few" when it is 1 to 3.
-const SMALL_COUNT = 3;
-const countLabel = (n, shareable) => (shareable && n > 0 && n <= SMALL_COUNT ? TEXT.aFew : String(n));
 
 function findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles, econ, withheld, ledgerPresent }) {
   const count = (pred) => rows.filter(pred).length;
@@ -751,10 +818,8 @@ function findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles
     [count((r) => r.release !== 'unsampled' && !(econ[r.domain] > 0)), PROBLEMS.noEconWeight],
     [ledgerPresent ? 0 : 1, PROBLEMS.noLedger],
   ];
-  return checks.filter(([n]) => n > 0).map(([n, text]) => ({ n, text }));
+  return checks.filter(([n]) => n > 0).map(([n, text]) => `${n} ${text}.`);
 }
-
-const problemLines = (problems, shareable) => problems.map(({ n, text }) => `${text === PROBLEMS.withheld ? countLabel(n, shareable) : n} ${text}.`);
 
 // ---------------------------------------------------------------------------------------------
 // Rendering.
@@ -780,7 +845,7 @@ const mdTable = (head, rows) => [`| ${head.join(' | ')} |`, `|${head.map(() => '
 const presample = (r) => r.score_source_breadth + r.score_freshness + r.score_economic_relevance;
 const H = TEXT.head;
 
-function summaryLines(rows, runRows, withheld, shareable) {
+function summaryLines(rows, runRows, withheld) {
   const n = (pred) => rows.filter(pred).length;
   const S = TEXT.summary;
   return mdTable([H.measure, H.count], [
@@ -790,71 +855,94 @@ function summaryLines(rows, runRows, withheld, shareable) {
     [S.sampled, n((r) => r.release !== 'unsampled')],
     [S.release, `${n((r) => r.release === 'pass')} / ${n((r) => r.release === 'blocked')} / ${n((r) => r.release === 'unsampled')}`],
     [S.ledger, `${runRows.length} / ${n((r) => r.ledger_run_status)} / ${n((r) => r.cost_basis === 'measured')}`],
-    [S.withheld, countLabel(withheld, shareable)],
-    ...(shareable ? [] : [[S.redacted, n((r) => r.privacy === 'redacted')]]),
+    [S.withheld, withheld],
+    [S.redacted, n((r) => r.privacy === 'redacted')],
   ]);
 }
 
-// The shareable tier shows the generic components and rules only; the per-domain weights (whose keys and values may
-// come from private configuration) are listed in the private tier alone.
-function weightLines(econ, localKeys, shareable) {
-  const domainList = Object.entries(econ).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([d, w]) => `${d} ${w}${localKeys.has(d) ? ` ${TEXT.local}` : ''}`).join('; ');
+// The scoring components and rules: public code constants, shown in both tiers.
+function weightTable() {
   const C = TEXT.component;
   const R = TEXT.rule;
-  return [
-    ...mdTable([H.component, H.max, H.rule], [
-      [C.integrity, WEIGHTS.evidenceIntegrity, fmt(R.integrity, { s: SAMPLE_FOR_FULL_CREDIT })],
-      [C.breadth, WEIGHTS.sourceBreadth, fmt(R.breadth, { h: HOSTS_FOR_FULL_CREDIT })],
-      [C.freshness, WEIGHTS.freshness, fmt(R.freshness, { d: DEFAULT_STALE_DAYS, w: FRESHNESS_DECAY_WINDOWS })],
-      [C.coverage, WEIGHTS.verificationCoverage, R.coverage],
-      [C.economic, WEIGHTS.economicRelevance, R.economic],
-    ]),
-    '', shareable ? TEXT.econPrivateOnly : fmt(TEXT.econ, { list: domainList }),
-  ];
+  return mdTable([H.component, H.max, H.rule], [
+    [C.integrity, WEIGHTS.evidenceIntegrity, fmt(R.integrity, { s: SAMPLE_FOR_FULL_CREDIT })],
+    [C.breadth, WEIGHTS.sourceBreadth, fmt(R.breadth, { h: HOSTS_FOR_FULL_CREDIT })],
+    [C.freshness, WEIGHTS.freshness, fmt(R.freshness, { d: DEFAULT_STALE_DAYS, w: FRESHNESS_DECAY_WINDOWS })],
+    [C.coverage, WEIGHTS.verificationCoverage, R.coverage],
+    [C.economic, WEIGHTS.economicRelevance, R.economic],
+  ]);
 }
 
-function ledgerLines(runRows, plan, ledgerPresent, shareable) {
+function econLine(econ, localKeys) {
+  const list = Object.entries(econ).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([d, w]) => `${d} ${w}${localKeys.has(d) ? ` ${TEXT.local}` : ''}`).join('; ');
+  return fmt(TEXT.econ, { list });
+}
+
+function ledgerLines(runRows, plan, ledgerPresent) {
   if (!ledgerPresent) return [TEXT.noLedger];
   const mean = (x) => (x === null || x === undefined ? TEXT.na : `${+x.toFixed(1)}%`);
-  const head = [...(shareable ? [] : [H.runTitle]), H.ledgerDomain, H.status, H.started, H.finished, H.matched];
   return [
     fmt(TEXT.measured, { n: plan.measuredRuns, s: mean(plan.sessionPerRun), w: mean(plan.weeklyPerRun) }), '',
-    ...mdTable(head, runRows.map((r) => [...(shareable ? [] : [r.title]), r.domain, r.status, r.started, r.finished ?? '', r.report ?? ''])),
+    ...mdTable([H.runTitle, H.ledgerDomain, H.status, H.started, H.finished, H.matched],
+      runRows.map((r) => [r.title, r.domain, r.status, r.started, r.finished ?? '', r.report ?? ''])),
   ];
 }
 
-// One renderer for both tiers. The shareable tier passes its own rows, runs and role rows only, and names each
-// report by its opaque id; the private tier names it by corpus key.
-export function registryMarkdown({ tier, rows, roleRows, runRows, plan, problems, econ, localKeys = new Set(), builtAt, withheld, nameCheck, ledgerPresent }) {
-  const shareable = tier === 'shareable';
-  const id = (r) => (shareable ? r.row_id : r.key);
-  const byId = (a, b) => String(id(a)).localeCompare(String(id(b)));
-  const ranked = rows.filter((r) => r.release !== 'unsampled').sort((a, b) => b.rank_score - a.rank_score || byId(a, b));
-  const queue = rows.filter((r) => r.release === 'unsampled' && r.evidence === 'cited').sort((a, b) => presample(b) - presample(a) || byId(a, b));
+// The private tier: one row per report, named by corpus key, with exact scores and full ledger links.
+export function privateMarkdown({ rows, roleRows, runRows, plan, problems, econ, localKeys = new Set(), builtAt, withheld, nameCheck, ledgerPresent }) {
+  const byKey = (a, b) => a.key.localeCompare(b.key);
+  const ranked = rows.filter((r) => r.release !== 'unsampled').sort((a, b) => b.rank_score - a.rank_score || byKey(a, b));
+  const queue = rows.filter((r) => r.release === 'unsampled' && r.evidence === 'cited').sort((a, b) => presample(b) - presample(a) || byKey(a, b));
   const roleCounts = Object.keys(ROLES).map((role) => [role, roleRows.filter((r) => r[role] >= 2).length, roleRows.filter((r) => r[role] === 3).length]);
   const order = { pass: 0, blocked: 1, unsampled: 2 };
-  const all = [...rows].sort((a, b) => (order[a.release] ?? 3) - (order[b.release] ?? 3) || byId(a, b));
+  const all = [...rows].sort((a, b) => (order[a.release] ?? 3) - (order[b.release] ?? 3) || byKey(a, b));
   return [
-    shareable ? TEXT.headShare : TEXT.headPrivate, '', shareable ? TEXT.noteShare : TEXT.notePrivate, '', TEXT.hypotheses, '',
-    `${fmt(TEXT.built, { at: builtAt, n: rows.length, w: countLabel(withheld, shareable) })}${shareable ? '' : ` ${TEXT.paths}`}`, '',
+    TEXT.headPrivate, '', TEXT.notePrivate, '', TEXT.hypotheses, '',
+    `${fmt(TEXT.built, { at: builtAt, n: rows.length, w: withheld })} ${TEXT.paths}`, '',
     nameCheck, '',
-    TEXT.hSummary, '', ...summaryLines(rows, runRows, withheld, shareable), '',
-    TEXT.hWeights, '', ...weightLines(econ, localKeys, shareable), '',
+    TEXT.hSummary, '', ...summaryLines(rows, runRows, withheld), '',
+    TEXT.hWeights, '', ...weightTable(), '', econLine(econ, localKeys), '', TEXT.bandNote, '',
     TEXT.hRanked, '',
-    ...mdTable([H.rank, H.report, H.domain, H.release, H.vci, H.share, H.integrity, H.breadth, H.fresh, H.coverage, H.econ, H.blocks],
-      ranked.map((r) => [r.rank_score, id(r), r.domain, r.release, `${r.claims_verified ?? 0} / ${r.claims_checked ?? 0} / ${r.claims_in_report ?? TEXT.na}`,
+    ...mdTable([H.rank, H.band, H.report, H.domain, H.release, H.vci, H.share, H.integrity, H.breadth, H.fresh, H.coverage, H.econ, H.blocks],
+      ranked.map((r) => [r.rank_score, r.score_band, r.key, r.domain, r.release, `${r.claims_verified ?? 0} / ${r.claims_checked ?? 0} / ${r.claims_in_report ?? TEXT.na}`,
         r.sampled_share, r.score_evidence_integrity, r.score_source_breadth, r.score_freshness, r.score_verification_coverage, r.score_economic_relevance,
         r.release_block_count])), '',
     TEXT.hQueue, '', TEXT.queueNote, '',
     ...mdTable([H.report, H.domain, H.kind, H.hosts, H.breadth, H.fresh, H.econ],
-      queue.map((r) => [id(r), r.domain, r.kind, r.source_hosts, r.score_source_breadth, r.score_freshness, r.score_economic_relevance])), '',
-    TEXT.hLedger, '', ...ledgerLines(runRows, plan, ledgerPresent, shareable), '',
-    TEXT.hProblems, '', ...(problems.length ? problemLines(problems, shareable).map((p) => `- ${p}`) : [TEXT.none]), '',
+      queue.map((r) => [r.key, r.domain, r.kind, r.source_hosts, r.score_source_breadth, r.score_freshness, r.score_economic_relevance])), '',
+    TEXT.hLedger, '', ...ledgerLines(runRows, plan, ledgerPresent), '',
+    TEXT.hProblems, '', ...(problems.length ? problems.map((p) => `- ${p}`) : [TEXT.none]), '',
     TEXT.hRoles, '', ...mdTable([H.role, H.rel2, H.rel3], roleCounts), '',
     TEXT.hAll, '',
-    ...mdTable([H.report, H.kind, H.domain, H.evidence, H.release, H.rank], all.map((r) => [id(r), r.kind, r.domain, r.evidence, r.release, r.rank_score])), '',
+    ...mdTable([H.report, H.kind, H.domain, H.evidence, H.release, H.rank], all.map((r) => [r.key, r.kind, r.domain, r.evidence, r.release, r.rank_score])), '',
   ].join('\n');
+}
+
+// The shareable tier, built from the aggregates alone.
+export function shareableMarkdown(agg, { builtDay }) {
+  const S = TEXT.share;
+  return [
+    S.title, '', S.note, '', TEXT.hypotheses, '', fmt(S.built, { day: builtDay }), '', S.withheld, '', TEXT.checkedShare, '',
+    S.hTotals, '', fmt(S.total, { n: agg.total }), '',
+    S.hDims, '',
+    ...agg.dims.flatMap((d) => [`### ${S.dims[d.id]}`, '', ...mdTable([S.head.bucket, S.head.reports], d.cells), '']),
+    TEXT.hWeights, '', ...weightTable(), '', TEXT.bandNote, '',
+    S.hCost, '', agg.cost, '',
+    S.hRoles, '', S.rolesNote, '', ...mdTable([S.head.role, S.head.rel2, S.head.rel3], agg.roles.map((r) => [r.role, r.rel2, r.rel3])), '',
+    S.diagnostics, '',
+  ].join('\n');
+}
+
+const TOTAL_ROW = { dimension: 'total', bucket: 'all' };
+
+function aggregateCsv(agg) {
+  const rows = [{ ...TOTAL_ROW, reports: agg.total }, ...agg.dims.flatMap((d) => d.cells.map(([bucket, reports]) => ({ dimension: d.id, bucket, reports })))];
+  return toCsv(rows, AGG_COLUMNS);
+}
+
+function roleAggregateCsv(agg) {
+  return toCsv(agg.roles.flatMap((r) => r.byDomain.map(([domain, n]) => ({ role: r.role, domain, reports_relevance_2_plus: n }))), ROLE_AGG_COLUMNS);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -889,6 +977,7 @@ function listMarkdown(dir) {
 }
 
 const keysUnder = (dir) => listMarkdown(dir).map((file) => path.relative(dir, file).split(path.sep).join('/'));
+const readUnder = (dir) => keysUnder(dir).map((key) => ({ key, text: readFileSync(path.join(dir, ...key.split('/')), 'utf8') }));
 const stemOf = (key) => key.replace(/\.md$/, '').split('/').join('__');
 
 // The same files `verify score` reads: <stem>.claims.jsonl and <stem>.manifest.json. The checked backup is
@@ -910,9 +999,8 @@ function readClaimSet(verifyDir, key) {
 }
 
 export function loadHome(home) {
-  const corpusDir = path.join(home, 'corpus');
   const verifyDir = path.join(home, 'verify');
-  const reports = keysUnder(corpusDir).map((key) => ({ key, text: readFileSync(path.join(corpusDir, ...key.split('/')), 'utf8') }));
+  const reports = readUnder(path.join(home, 'corpus'));
   const claimSets = new Map();
   for (const { key } of reports) {
     const set = readClaimSet(verifyDir, key);
@@ -925,13 +1013,16 @@ export function loadHome(home) {
   const redactFile = path.join(home, 'registry', 'redact.sha256.txt');
   const weightsFile = path.join(home, 'registry', 'weights.local.json');
   const exclusionPhrases = readLines(path.join(home, 'exclude.txt'));
+  const publicDomains = readJson(path.join(HERE, 'domains.json'), { domains: [] }).domains;
+  // Quarantined documents are read for their front matter only: it is what ties them to their ledger runs.
+  const quarantineReports = readUnder(path.join(home, 'quarantine'));
   return {
-    reports, claimSets, orphanClaimFiles, exclusionPhrases,
+    reports, claimSets, orphanClaimFiles, exclusionPhrases, publicDomains, quarantineReports,
     ledger: existsSync(usage) ? readJsonl(usage) : null,
-    domains: [...readJson(path.join(home, 'domains.local.json'), { domains: [] }).domains, ...readJson(path.join(HERE, 'domains.json'), { domains: [] }).domains],
+    domains: [...readJson(path.join(home, 'domains.local.json'), { domains: [] }).domains, ...publicDomains],
     local: validateLocalWeights(readJson(weightsFile, {}), weightsFile),
     exclusionIds: new Set(readLines(path.join(home, 'exclude-ids.txt'))),
-    quarantineKeys: new Set(keysUnder(path.join(home, 'quarantine'))),
+    quarantineKeys: new Set(quarantineReports.map((r) => r.key)),
     // The same list corpus.mjs classifies with: the default personal patterns plus exclude.txt.
     personalPatterns: [...DEFAULT_PERSONAL_PATTERNS, ...exclusionPhrases],
     denylist: existsSync(redactFile) ? parseRedactList(readFileSync(redactFile, 'utf8')) : null,
@@ -939,8 +1030,8 @@ export function loadHome(home) {
   };
 }
 
-// Local weights are numbers only, so configuration cannot smuggle text into a score. The error names the file, not
-// the offending key or value.
+// Local weights are numbers only, so configuration cannot smuggle text into the private tier's scores. The error
+// names the file, not the offending key or value.
 export function validateLocalWeights(local, file = 'weights.local.json') {
   for (const w of Object.values(local.economicDomainWeights ?? {})) {
     if (typeof w !== 'number' || !Number.isFinite(w) || w < 0 || w > 1) throw new Error(`${file}: every economic domain weight must be a number from 0 to 1`);
@@ -953,22 +1044,6 @@ export function validateLocalWeights(local, file = 'weights.local.json') {
   return local;
 }
 
-// The row-id salt: 32 random bytes, created on the first build and kept in the private tier (owner-only where the
-// file system honours it). Ids are stable while it exists; deleting it re-keys every id.
-const SALT_FILE = '.id-salt';
-const SALT_RE = /^[0-9a-f]{64}$/;
-
-export function idSaltFor(home) {
-  const file = path.join(home, 'registry', 'private', SALT_FILE);
-  if (!existsSync(file)) {
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, `${freshSalt()}\n`, { mode: 0o600, flag: 'wx' });
-  }
-  const salt = readFileSync(file, 'utf8').trim();
-  if (!SALT_RE.test(salt)) throw new Error(`${file} is not a 64-hex-digit salt; delete it to create a new one (every row id will change)`);
-  return salt;
-}
-
 function writeAtomic(file, text) {
   mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
@@ -976,21 +1051,16 @@ function writeAtomic(file, text) {
   renameSync(tmp, file);
 }
 
-// Builds before this layout wrote the private files to registry/ itself, through `<name>.tmp`; both the files and
-// any temporary file an interrupted write left behind are removed, so no stale private copy sits where people look
-// for something to share. Leftover temporary files in the tier folders go too.
-const OUTPUT_NAMES = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'];
-const LEGACY_OUTPUTS = OUTPUT_NAMES.flatMap((n) => [n, `${n}.tmp`]);
-const STALE_TIER_TEMPS = ['private', 'shareable'].flatMap((t) => OUTPUT_NAMES.map((n) => `${t}/${n}.tmp`));
-
-function tierFiles(tier, { rows, roleRows, columns, roleColumns, markdown }) {
-  return {
-    [`${tier}/reports.csv`]: toCsv(rows, columns),
-    [`${tier}/reports.jsonl`]: `${rows.map((r) => JSON.stringify(r)).join('\n')}${rows.length ? '\n' : ''}`,
-    [`${tier}/roles.csv`]: toCsv(roleRows, roleColumns),
-    [`${tier}/REGISTRY.md`]: markdown,
-  };
-}
+// Removed after every successful build: the private files older builds wrote to registry/ itself, the per-report
+// files older builds wrote to shareable/, the row-id salt an older build created (ids no longer need one), and any
+// temporary file an interrupted write left behind.
+const OLD_NAMES = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md', 'aggregates.csv'];
+export const STALE_FILES = [
+  ...OLD_NAMES.flatMap((n) => [n, `${n}.tmp`]),
+  'shareable/reports.csv', 'shareable/reports.jsonl',
+  ...['private', 'shareable'].flatMap((t) => OLD_NAMES.map((n) => `${t}/${n}.tmp`)),
+  'private/.id-salt',
+];
 
 export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
   const input = loadHome(home);
@@ -998,16 +1068,19 @@ export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
     throw new Error(`no redaction list at ${input.redactFile}: the private tier could name people. Add hashes with "node registry.mjs redact-hash", or pass --allow-unredacted`);
   }
   const redact = makeRedactor({ entries: input.denylist ?? [], phrases: input.exclusionPhrases });
-  const reg = buildRegistry({ ...input, redact, now, idSalt: idSaltFor(home) });
-  const common = { plan: reg.plan, problems: reg.problems, econ: reg.econ, builtAt: new Date(now).toISOString(), withheld: reg.withheld,
-    ledgerPresent: Boolean(input.ledger), localKeys: new Set(Object.keys(input.local.economicDomainWeights ?? {})) };
+  const reg = buildRegistry({ ...input, redact, now });
+  const builtAt = new Date(now).toISOString();
   const privateCheck = input.denylist
     ? fmt(TEXT.checkedPrivate, { d: input.denylist.length, p: input.exclusionPhrases.length }) : TEXT.uncheckedPrivate;
   const files = {
-    ...tierFiles('shareable', { rows: reg.shareRows, roleRows: reg.shareRoleRows, columns: SHARE_COLUMNS, roleColumns: SHARE_ROLE_COLUMNS,
-      markdown: registryMarkdown({ ...common, tier: 'shareable', rows: reg.shareRows, roleRows: reg.shareRoleRows, runRows: reg.shareRuns, nameCheck: TEXT.checkedShare }) }),
-    ...tierFiles('private', { rows: reg.rows, roleRows: reg.roleRows, columns: PRIVATE_COLUMNS, roleColumns: PRIVATE_ROLE_COLUMNS,
-      markdown: registryMarkdown({ ...common, tier: 'private', rows: reg.rows, roleRows: reg.roleRows, runRows: reg.runRows, nameCheck: privateCheck }) }),
+    'shareable/REGISTRY.md': shareableMarkdown(reg.aggregates, { builtDay: builtAt.slice(0, 10) }),
+    'shareable/aggregates.csv': aggregateCsv(reg.aggregates),
+    'shareable/roles.csv': roleAggregateCsv(reg.aggregates),
+    'private/REGISTRY.md': privateMarkdown({ ...reg, builtAt, nameCheck: privateCheck, ledgerPresent: Boolean(input.ledger),
+      localKeys: new Set(Object.keys(input.local.economicDomainWeights ?? {})) }),
+    'private/reports.csv': toCsv(reg.rows, PRIVATE_COLUMNS),
+    'private/reports.jsonl': `${reg.rows.map((r) => JSON.stringify(r)).join('\n')}${reg.rows.length ? '\n' : ''}`,
+    'private/roles.csv': toCsv(reg.roleRows, PRIVATE_ROLE_COLUMNS),
   };
   const vocabulary = shareVocabulary();
   const refused = Object.entries(files).flatMap(([name, text]) => {
@@ -1016,14 +1089,14 @@ export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
     if (name.startsWith('shareable/')) {
       const scan = shareableScan(text, vocabulary);
       if (scan.nonAscii) why.push(`${scan.nonAscii} non-ASCII character(s)`);
-      if (scan.unknownWords) why.push(`${scan.unknownWords} word(s) outside the registry vocabulary`);
+      if (scan.unknownWords) why.push(`${scan.unknownWords} word(s) the registry does not define`);
     }
     return why.length ? [`${name}: ${why.join(', ')}`] : [];
   });
   if (refused.length) throw new Error(`share-check failed, nothing was written: ${refused.join('; ')}`);
   const dir = path.join(home, 'registry');
   for (const [name, text] of Object.entries(files)) writeAtomic(path.join(dir, ...name.split('/')), text);
-  for (const name of [...LEGACY_OUTPUTS, ...STALE_TIER_TEMPS]) rmSync(path.join(dir, ...name.split('/')), { force: true });
+  for (const name of STALE_FILES) rmSync(path.join(dir, ...name.split('/')), { force: true });
   return { dir, files: Object.keys(files), reports: reg.rows.length, withheld: reg.withheld, problems: reg.problems };
 }
 
