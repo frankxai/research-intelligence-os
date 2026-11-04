@@ -261,6 +261,9 @@ function buildPassages({ wanted, scope } = {}) {
     // A reviewed document is searchable only in its own namespace; unreviewed ones stay visible.
     const verdict = triage.get(rel);
     if (scope && verdict?.scope !== scope) continue;
+    // Without --scope the default namespaces are research and decisions; creative and private-ops
+    // material is searched only when asked for, so manuscripts never answer a business question.
+    if (!scope && ['creative', 'private-ops'].includes(verdict?.scope)) continue;
     if (verdict?.vectorize === 'no') continue;
     const { meta, chunks } = chunkMarkdown(readFileSync(file, 'utf8'));
     for (const c of chunks) passages.push({ ...c, key: rel, evidence: meta.evidence ?? 'n/a', verification: meta.verification ?? '?' });
@@ -276,16 +279,17 @@ function localSearch(query) {
 }
 
 // Retrieval evaluation: questions live in ~/.starlight/research/eval/questions.json as
-// [{ "q": "...", "expect": ["substring of the right document key"] }]. Reports hit@1, hit@5 and
+// [{ "q": "...", "expect": ["substring of the right document key"], "scope": "optional namespace" }]. Reports hit@1, hit@5 and
 // MRR for the local BM25 baseline; any vector or hybrid index must beat these on the same file.
 function cmdEval() {
   const file = flag('file') || path.join(HOME, 'eval', 'questions.json');
   const questions = readJson(file, null) || die(`no questions at ${file}`);
-  const passages = buildPassages({ scope: flag('scope') });
+  const byScope = new Map();
+  const passagesFor = (scope) => { const k = scope ?? flag('scope') ?? ''; if (!byScope.has(k)) byScope.set(k, buildPassages({ scope: k || undefined })); return byScope.get(k); };
   let h1 = 0; let h5 = 0; let rr = 0;
   const misses = [];
-  for (const { q, expect } of questions) {
-    const ranked = bm25Rank(passages, q, { limit: 50 });
+  for (const { q, expect, scope } of questions) {
+    const ranked = bm25Rank(passagesFor(scope), q, { limit: 50 });
     const keys = [];
     for (const p of ranked) if (!keys.includes(p.key)) keys.push(p.key);
     const pos = keys.findIndex((k) => expect.some((e) => k.includes(e)));
@@ -294,7 +298,7 @@ function cmdEval() {
     if (pos >= 0) rr += 1 / (pos + 1); else misses.push(q);
   }
   const n = questions.length;
-  console.log(JSON.stringify({ questions: n, passages: passages.length, hitAt1: +(h1 / n).toFixed(3), hitAt5: +(h5 / n).toFixed(3), mrr: +(rr / n).toFixed(3), misses }, null, 2));
+  console.log(JSON.stringify({ questions: n, passages: passagesFor().length, hitAt1: +(h1 / n).toFixed(3), hitAt5: +(h5 / n).toFixed(3), mrr: +(rr / n).toFixed(3), misses }, null, 2));
 }
 
 function cmdAudit() {
