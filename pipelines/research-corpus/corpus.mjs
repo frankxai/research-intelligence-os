@@ -46,6 +46,7 @@ const P = {
   listing: path.join(HOME, 'drive-listing.json'),
   inventory: path.join(HOME, 'inventory.json'),
   exclude: path.join(HOME, 'exclude.txt'),
+  excludeIds: path.join(HOME, 'exclude-ids.txt'),
   corpus: path.join(HOME, 'corpus'),
   usage: path.join(HOME, 'gemini-usage.jsonl'),
   manifest: path.join(HOME, 'push-manifest.json'),
@@ -141,7 +142,9 @@ function cmdClassify() {
   const raw = readJson(source, null);
   if (!raw) die(`no listing at ${source}; run "list" first or pass a JSON file`);
   const files = Array.isArray(raw) ? raw : raw.files;
-  const inventory = classify(files, { domains, personalPatterns: personalPatterns() });
+  const blocked = new Set(existsSync(P.excludeIds) ? readFileSync(P.excludeIds, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : []);
+  const inventory = classify(files, { domains, personalPatterns: personalPatterns() })
+    .map((e) => (blocked.has(e.id) ? { ...e, kind: 'sensitive', domain: null, include: false } : e));
   writeAtomic(P.inventory, JSON.stringify(inventory, null, 2));
   const count = (pred) => inventory.filter(pred).length;
   console.log(JSON.stringify({
@@ -251,10 +254,16 @@ function listCorpusFiles(dir) {
 
 function localSearch(query) {
   const wanted = flag('domain');
+  const scope = flag('scope');
+  const triage = readTriage();
   const passages = [];
   for (const file of listCorpusFiles(P.corpus)) {
     const rel = path.relative(P.corpus, file).split(path.sep).join('/');
     if (wanted && !rel.startsWith(`${wanted}/`)) continue;
+    // A reviewed document is searchable only in its own namespace; unreviewed ones stay visible.
+    const verdict = triage.get(rel);
+    if (scope && verdict?.scope !== scope) continue;
+    if (verdict?.vectorize === 'no') continue;
     const { meta, chunks } = chunkMarkdown(readFileSync(file, 'utf8'));
     for (const c of chunks) passages.push({ ...c, key: rel, evidence: meta.evidence ?? 'n/a', verification: meta.verification ?? '?' });
   }
@@ -293,6 +302,46 @@ function cmdPrune() {
     if (!keep.has(path.relative(P.corpus, file).split(path.sep).join('/'))) { rmSync(file); removed += 1; }
   }
   console.log(`pruned ${removed} local file(s) no longer in the inventory`);
+}
+
+// Triage verdicts (triage-*.jsonl, written by reviewers) decide what is indexed and in which
+// namespace. "no" documents are moved to a local quarantine folder, never deleted, and their Drive
+// ids are recorded so a later export cannot bring them back.
+function readTriage() {
+  const map = new Map();
+  const dir = path.join(HOME, 'triage');
+  if (!existsSync(dir)) return map;
+  for (const f of readdirSync(dir).filter((n) => /^triage-.*[.]jsonl$/.test(n))) {
+    for (const line of readFileSync(path.join(dir, f), 'utf8').split(/\r?\n/).filter(Boolean)) {
+      try { const r = JSON.parse(line); map.set(r.key, r); } catch { /* skip a malformed line */ }
+    }
+  }
+  return map;
+}
+
+function cmdTriage() {
+  const sub = process.argv[3] || 'summary';
+  const triage = readTriage();
+  if (sub === 'summary') {
+    const tally = (f) => [...triage.values()].reduce((a, r) => ((a[f(r)] = (a[f(r)] ?? 0) + 1), a), {});
+    console.log(JSON.stringify({ reviewed: triage.size, byTier: tally((r) => r.tier), byVectorize: tally((r) => r.vectorize), byScope: tally((r) => r.scope), byAuthority: tally((r) => r.authority) }, null, 2));
+    return;
+  }
+  if (sub !== 'apply') die('usage: triage summary|apply');
+  const quarantine = path.join(HOME, 'quarantine');
+  const ids = existsSync(P.excludeIds) ? readFileSync(P.excludeIds, 'utf8') : '';
+  let moved = 0;
+  for (const r of triage.values()) {
+    const src = path.join(P.corpus, r.key);
+    if (r.vectorize !== 'no' || !existsSync(src)) continue;
+    const id = (readFileSync(src, 'utf8').match(/^source_id: (.+)$/m) || [])[1];
+    if (id && !ids.includes(id)) appendFileSync(P.excludeIds, `${id}\n`);
+    const dest = path.join(quarantine, r.key);
+    mkdirSync(path.dirname(dest), { recursive: true });
+    renameSync(src, dest);
+    moved += 1;
+  }
+  console.log(`quarantined ${moved} document(s) to ${quarantine}; ids recorded in ${P.excludeIds}`);
 }
 
 async function cmdAsk() {
@@ -384,7 +433,7 @@ function cmdUsage() {
 
 const commands = {
   list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, sync: cmdSync, status: cmdStatus,
-  search: cmdSearch, audit: cmdAudit, prune: cmdPrune, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
+  search: cmdSearch, triage: cmdTriage, audit: cmdAudit, prune: cmdPrune, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
 };
 const cmd = commands[process.argv[2]];
 if (!cmd) die(`commands: ${Object.keys(commands).join(', ')}`, 2);
