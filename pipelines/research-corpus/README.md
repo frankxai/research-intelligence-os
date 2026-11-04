@@ -48,15 +48,15 @@ Tests: `node --test lib.test.mjs`.
 
 ## Claim verification
 
-A report is trusted claim by claim, not as a document. `verify sample` reads the report's claims table (or, without one, sentences that end in a citation), maps glued citation numbers to the Works cited list, and writes a seeded sample to `RESEARCH_HOME/verify/<domain>__<report>.claims.jsonl` (schema `claim-evidence/v1`: claim, source URL, report's date, excerpt, source's own date, status, contradictions) plus a readable checklist. Deterministic signals come first: `spacing-lost` (the export dropped spaces between dollar signs, so numbers are suspect), `url-not-in-works-cited`, `ref-differs-from-source-url`, `no-source`.
+A report is trusted claim by claim, not as a document. `verify sample` takes a corpus key (a `.md` report), reads the report's claims table (or, without one, sentences that end in a citation), maps glued citation numbers to the Works cited list, and writes a seeded sample to `RESEARCH_HOME/verify/<domain>__<report>.claims.jsonl` (schema `claim-evidence/v1`: claim, source URL, report's date, excerpt, source's own date, status, contradictions, and `report_sha256`, the digest of the report body the claims came from) plus a readable checklist. It never writes anywhere else. Deterministic signals come first: `spacing-lost` (the export dropped spaces between dollar signs, so numbers are suspect), `url-not-in-works-cited`, `ref-differs-from-source-url`, `no-source`.
 
-A checker that did not write the report fetches each source and sets `status` to `verified`, `partial`, `unsupported`, `contradicted`, `garbled` or `unreachable`, with a verbatim excerpt. `verify score` blocks release on any contradicted claim, on more than 20% unsupported, contradicted or garbled, on more than 30% unreachable, or on unchecked claims. The thresholds are starting hypotheses.
+A checker that did not write the report fetches each source and sets `status` to `verified`, `partial`, `unsupported`, `contradicted`, `garbled` or `unreachable`, and fills `checker` and `checked_at`; `verified`, `partial` and `contradicted` also need a verbatim `excerpt`. `source_date` is recorded when the source has one and is not required. `verify score` re-reads the report and blocks release when the report is missing or its body changed since sampling (resample with `--force`), when records are missing or duplicated, when a checked record lacks its evidence, on any contradicted claim, on more than 20% unsupported, contradicted or garbled, on more than 30% unreachable, or on unchecked claims. It exits 1 unless the release passes, so `verify score <key> && …` stops on a block. The thresholds are starting hypotheses.
 
 ## Scheduled refresh
 
-`scheduled-run.ps1` (staged, not registered) runs `list`, `classify`, `export` and `doctor` one step at a time with a per-step timeout and a lock, stops at the first failure, logs to `RESEARCH_HOME/runs/` and writes `runs/last-run.json`. `-DryRun` prints the plan. `register-daily.ps1` registers it with the session brief after it; the owner runs that.
+`scheduled-run.ps1` (staged, not registered) runs `list`, `classify`, `export` and `doctor` one step at a time with a per-step timeout and a lock, stops at the first failure, logs to `RESEARCH_HOME/runs/` and writes `runs/last-run.json`. An invocation that finds the lock held only logs the skip, so `last-run.json` keeps describing the run that holds the lock. `-DryRun` prints the plan. `register-daily.ps1` registers it with the session brief after it, and the task exits with the refresh's failure code even when the brief succeeds; the owner runs that.
 
-`doctor` fails on a quarantine leak (a corpus file whose Drive id is excluded or whose key is in `quarantine/`) and on a failed last run; it warns on a corpus title that matches a quarantined one, a Drive listing older than 36 h, runs logged without `done`, a stale or full usage window, and a missing or skipped run.
+`doctor` fails on a quarantine leak (a corpus file whose Drive id is excluded or whose key is in `quarantine/`), on a failed last run and on a run still `running` past the 75-minute scheduler limit; it warns on a corpus title that matches a quarantined one, a Drive listing older than 36 h, runs logged without `done`, a stale or full usage window, and a missing run.
 
 ## Clients
 
@@ -96,10 +96,12 @@ A Claude Code SessionStart hook prints `~/.starlight/brief/session-brief.md`, so
 Gemini Ultra meters usage in percent, not runs: `gemini.google.com/usage` shows a rolling window ("Current usage", resets in about five hours) and a weekly limit. Third-party per-day counts (120, 200) are not what the app enforces. The ledger measures the real cost per run:
 
 1. Before a run: read the Usage limits page (neo helper `readUsage`) and `node corpus.mjs usage reading --session P --weekly P --session-resets "HH:MM" --weekly-resets "D Mon HH:MM" --shot <file>`.
-2. Start it: `usage run --domain <id> --title "<topic>"`.
+2. Start it: `usage run --domain <id> --title "<topic>"` (the title is required: it is how the run is closed).
 3. When it finishes: `usage done --title "<topic>"`, then another `usage reading`.
-4. `usage plan` returns the mean weekly and window percent per run, runs left this window and week, and runs per week. Overlapping runs are skipped because their cost cannot be separated, so run one at a time until you have three measured runs.
+4. `usage plan` returns the mean weekly and window percent per run, runs left this window and week, and runs per week. A run is measured only when it is the only run between its two readings, and not when a meter fell or the window's reset time passed between them, so take a reading between runs until you have three measured runs.
 5. A run that stalls or ends without a report: `usage abandon --title "<topic>" --at <ISO time it stopped>`. Until it is closed, every later run counts as overlapping it and cannot be measured.
+
+`done` and `abandon` refuse a title that matches no open run at that time and list the runs that are open, so a typo cannot leave the real run open.
 
 ## NotebookLM
 

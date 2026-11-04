@@ -4,7 +4,8 @@
 # (the rclone remote is drive.readonly).
 #   pwsh -NoProfile -File scheduled-run.ps1             run once now
 #   pwsh -NoProfile -File scheduled-run.ps1 -DryRun     print the plan, run nothing
-# Every run writes RESEARCH_HOME/runs/last-run.json; `node corpus.mjs doctor` flags a failed, skipped or missing run.
+# Every run writes RESEARCH_HOME/runs/last-run.json; `node corpus.mjs doctor` flags a failed, killed or missing run.
+# An invocation that finds the lock held only logs the skip.
 param(
   [switch]$DryRun,
   [int]$StepTimeoutMinutes = 15,
@@ -51,8 +52,9 @@ try {
 } catch [IO.IOException] {
   $age = (Get-Date) - (Get-Item $lock).LastWriteTime
   if ($age.TotalMinutes -lt $StaleLockMinutes) {
+    # Only the log records the skip: last-run.json keeps describing the run that holds the lock,
+    # so doctor still fails it if that run was killed and never finished.
     Add-Content -Path $log -Value "skipped: lock held for $([int]$age.TotalMinutes) min"
-    Write-Record 'skipped-locked' @()
     exit 0
   }
   Add-Content -Path $log -Value "taking over a stale lock ($([int]$age.TotalMinutes) min old)"
@@ -95,4 +97,6 @@ try {
 }
 Add-Content -Path $log -Value "== end $status"
 "$status -> $lastRun"
+# Explicit on both paths, so a caller's $LASTEXITCODE always describes this run.
 if ($status -ne 'ok') { exit 1 }
+exit 0

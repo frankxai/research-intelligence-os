@@ -1,4 +1,5 @@
 // Pure functions for the research corpus pipeline. No I/O here, so every rule is testable.
+import { createHash } from 'node:crypto';
 
 const DAY_MS = 86_400_000;
 const DOC_MIME = 'application/vnd.google-apps.document';
@@ -152,8 +153,9 @@ export function usageToday(ledger, now = new Date()) {
 
 // Gemini Ultra meters usage in percent: a rolling window and a weekly limit, not a run count.
 // A run's cost is the rise in each percentage between the last reading before it started
-// and the first reading after it finished (a 'done' record). Overlapping runs are skipped
-// because their cost cannot be separated. A run that never finished is closed with an
+// and the first reading after it finished (a 'done' record). A run that shares that interval with
+// another run is skipped because the costs cannot be separated, and so is a run across a meter reset,
+// whose difference is not a cost. A run that never finished is closed with an
 // 'abandoned' record whose `at` says when it stopped; it is never measured, and it stops
 // counting as an overlap after `at`.
 // An end record belongs to the run with its title that was active at the end's effective time
@@ -168,6 +170,15 @@ function runEnd(rows, run) {
   return ends[0] ?? null;
 }
 
+// The run a 'done' or 'abandoned' record at `at` would close: same title, started by `at`, not yet
+// ended, and not followed by a retry under that title before `at` (the same window runEnd uses).
+// null means the closure would match nothing and leave the intended run open.
+export function openRunFor(ledger, title, at) {
+  const rows = [...ledger].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  const same = rows.filter((r) => r.type === 'run' && r.title === title);
+  return same.filter((r, i) => r.ts <= at && (!same[i + 1] || at <= same[i + 1].ts) && !runEnd(rows, r)).at(-1) ?? null;
+}
+
 export function usagePlan(ledger) {
   const rows = [...ledger].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
   const readings = rows.filter((r) => r.type === 'reading');
@@ -175,14 +186,20 @@ export function usagePlan(ledger) {
   for (const run of rows.filter((r) => r.type === 'run')) {
     const done = runEnd(rows, run);
     if (done?.type !== 'done') continue;
-    const overlaps = rows.some((r) => {
-      if (r.type !== 'run' || r === run) return false;
-      const rEnd = runEnd(rows, r);
-      return r.ts < done.ts && (!rEnd || rEnd.ts > run.ts);
-    });
     const before = readings.filter((r) => r.ts <= run.ts).at(-1);
     const after = readings.find((r) => r.ts >= done.ts);
-    if (overlaps || !before || !after) continue;
+    if (!before || !after) continue;
+    // Any other run active between the two readings shares the rise, so no single cost can be read
+    // from it: this covers runs that overlap this one and runs before or after it in the same interval.
+    const shared = rows.some((r) => {
+      if (r.type !== 'run' || r === run) return false;
+      const rEnd = runEnd(rows, r);
+      return r.ts < after.ts && (!rEnd || rEnd.ts > before.ts);
+    });
+    // A meter that fell, or a window whose reset time passed between the readings, was reset mid-run.
+    const reset = after.weeklyPct < before.weeklyPct || after.sessionPct < before.sessionPct
+      || (windowResetAfter(before.ts, before.sessionResets) ?? Infinity) <= Date.parse(after.ts);
+    if (shared || reset) continue;
     costs.push({
       title: run.title, domain: run.domain,
       weekly: after.weeklyPct - before.weeklyPct, session: after.sessionPct - before.sessionPct,
@@ -544,9 +561,17 @@ function fnv1a(s) {
   return h.toString(16).padStart(8, '0');
 }
 
-export function claimRecords(claims, { reportKey, sampledAt, seed }) {
+// The digest of the text the claims were drawn from. Front matter is left out, so a re-export that
+// only rewrites `exported:` keeps the digest; any change to the report body changes it.
+export function reportDigest(markdown) {
+  const fm = String(markdown).match(/^---\n[\s\S]*?\n---\n/);
+  return createHash('sha256').update(String(markdown).slice(fm ? fm[0].length : 0)).digest('hex');
+}
+
+export function claimRecords(claims, { reportKey, sampledAt, seed, reportSha256 = null }) {
   return claims.map((c) => ({
-    schema: CLAIM_SCHEMA, id: `${reportKey}#${fnv1a(c.claim)}`, report_key: reportKey, sampled_at: sampledAt, seed,
+    schema: CLAIM_SCHEMA, id: `${reportKey}#${fnv1a(c.claim)}`, report_key: reportKey, report_sha256: reportSha256,
+    sampled_at: sampledAt, seed,
     origin: c.origin, category: c.category, claim: c.claim, claim_raw: c.claimRaw,
     sample_size: claims.length,
     source_url: c.sourceUrls[0] ?? null, source_urls: c.sourceUrls, cited_refs: c.citedRefs, claimed_date: c.claimedDate,
@@ -555,17 +580,37 @@ export function claimRecords(claims, { reportKey, sampledAt, seed }) {
   }));
 }
 
-export function scoreClaims(records) {
+// A status is an assertion; the record must carry what backs it. Every checked record names its
+// checker and when it was checked; verified, partial and contradicted also quote the source.
+// source_date is not required: many sources carry no date, and a required field invites invented ones.
+const NEEDS_EXCERPT = new Set(['verified', 'partial', 'contradicted']);
+function lacksEvidence(r) {
+  if (!CLAIM_STATUSES.includes(r.status) || r.status === 'pending') return false;
+  const filled = (v) => typeof v === 'string' && v.trim() !== '';
+  if (!filled(r.checker) || Number.isNaN(Date.parse(r.checked_at))) return true;
+  return NEEDS_EXCERPT.has(r.status) && !filled(r.excerpt);
+}
+
+// reportDigest: reportDigest() of the report as it is now, or null when it is gone from the corpus.
+export function scoreClaims(records, { reportDigest: currentDigest = null } = {}) {
   const byStatus = Object.fromEntries(CLAIM_STATUSES.map((s) => [s, 0]));
   for (const r of records) byStatus[CLAIM_STATUSES.includes(r.status) ? r.status : 'pending'] += 1;
   const checked = records.length - byStatus.pending - byStatus.unreachable;
   const rate = (x) => (checked ? +(x / checked).toFixed(3) : null);
   const failed = byStatus.unsupported + byStatus.contradicted + byStatus.garbled;
   const blocks = [];
-  // An emptied or trimmed file must not pass: every record states how many were sampled.
+  // An emptied, trimmed or padded file must not pass: every record states how many were sampled,
+  // and only distinct claim ids count toward that number.
   const sampled = Math.max(0, ...records.map((r) => Number(r.sample_size) || 0));
+  const unique = new Set(records.map((r) => r.id)).size;
   if (!records.length) blocks.push('no claim records');
-  else if (records.length < sampled) blocks.push(`${sampled - records.length} sampled record(s) missing from the file`);
+  else if (unique < sampled) blocks.push(`${sampled - unique} sampled record(s) missing from the file`);
+  if (unique < records.length) blocks.push(`${records.length - unique} duplicate record(s): each sampled claim counts once`);
+  // A verdict describes the text that was sampled; a changed or deleted report needs a new sample.
+  if (records.length && !currentDigest) blocks.push('the report is missing from the corpus');
+  else if (records.some((r) => r.report_sha256 !== currentDigest)) blocks.push('the report changed since the sample was drawn (or the sample has no report digest): resample with --force');
+  const unbacked = records.filter(lacksEvidence).length;
+  if (unbacked) blocks.push(`${unbacked} checked claim(s) lack evidence (checker, checked_at, and an excerpt for verified, partial or contradicted)`);
   if (byStatus.contradicted) blocks.push(`${byStatus.contradicted} claim(s) contradicted by the cited source`);
   if (checked && failed / checked > MAX_FAILED_SHARE) blocks.push(`${failed}/${checked} checked claims unsupported, contradicted or garbled (limit ${MAX_FAILED_SHARE * 100}%)`);
   if (records.length && byStatus.unreachable / records.length > MAX_UNREACHABLE_SHARE) blocks.push('too many unreachable sources to judge the sample');
@@ -650,6 +695,7 @@ export function pipelineHealth({ now = Date.now(), corpus = [], quarantineKeys =
   if (!lastRun) add('last-run', 'warn', 'no scheduled run recorded yet');
   else if (lastRun.status === 'running' && runAgeMin > RUN_MAX_MIN) add('last-run', 'fail', `scheduled run started ${Math.round(runAgeMin)} min ago and never finished (killed by the scheduler?)`);
   else if (lastRun.status === 'running') add('last-run', 'warn', 'a scheduled run is in progress');
+  // Only records written before skips stopped touching last-run.json carry this status.
   else if (lastRun.status === 'skipped-locked') add('last-run', 'warn', 'last scheduled run skipped: another run held the lock');
   else if (lastRun.status !== 'ok') add('last-run', 'fail', `last scheduled run ended "${lastRun.status}"`);
   else if (now - Date.parse(lastRun.ts) > LAST_RUN_STALE_H * HOUR_MS) add('last-run', 'warn', `last scheduled run was ${Math.round((now - Date.parse(lastRun.ts)) / HOUR_MS)}h ago`);

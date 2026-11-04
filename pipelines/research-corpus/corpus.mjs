@@ -20,7 +20,7 @@
 //   node corpus.mjs usage plan                                   measured % cost per run, runs left this window/week
 //   node corpus.mjs usage show
 //   node corpus.mjs verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force]
-//   node corpus.mjs verify score <corpus-key|claims.jsonl>        tally checked claims, release pass/blocked
+//   node corpus.mjs verify score <corpus-key|claims.jsonl>        tally checked claims, release pass/blocked (exit 1)
 //   node corpus.mjs doctor [--skip check,check]                    silent-failure checks; exit 1 on any fail
 //
 // All private state lives in RESEARCH_HOME (default ~/.starlight/research), never in this repo.
@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
   localFrontMatter, slugify, usageToday, usagePlan, evidenceStats, chunkMarkdown, bm25Rank,
-  extractClaims, sampleClaims, claimRecords, scoreClaims, claimChecklist, pipelineHealth,
+  extractClaims, sampleClaims, claimRecords, scoreClaims, claimChecklist, pipelineHealth, openRunFor, reportDigest,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -449,9 +449,10 @@ function cmdUsage() {
     if (remaining === undefined) die('usage: usage snapshot --remaining <N> [--note "..."]');
     appendFileSync(P.usage, JSON.stringify({ ts, type: 'snapshot', remaining: Number(remaining), note: flag('note') ?? null }) + '\n');
   } else if (sub === 'run') {
-    const domain = flag('domain');
+    const [domain, title] = [flag('domain'), flag('title')];
     if (!domains.some((d) => d.id === domain)) die(`--domain must be one of: ${domains.map((d) => d.id).join(', ')}`);
-    appendFileSync(P.usage, JSON.stringify({ ts, type: 'run', domain, title: flag('title') ?? null }) + '\n');
+    if (!title) die('usage: usage run --domain <id> --title "<topic>" (done and abandon close a run by its title)');
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'run', domain, title }) + '\n');
   } else if (sub === 'reading') {
     const [s, w] = [flag('session'), flag('weekly')];
     if (s === undefined || w === undefined) die('usage: usage reading --session <pct> --weekly <pct> [--session-resets "19:18"] [--weekly-resets "10 Nov 15:18"] [--shot <file>]');
@@ -460,17 +461,32 @@ function cmdUsage() {
       sessionResets: flag('session-resets') ?? null, weeklyResets: flag('weekly-resets') ?? null, shot: flag('shot') ?? null,
     }) + '\n');
   } else if (sub === 'done') {
-    appendFileSync(P.usage, JSON.stringify({ ts, type: 'done', title: flag('title') ?? null }) + '\n');
+    const title = flag('title');
+    if (!title) die('usage: usage done --title "<run title>"');
+    requireOpenRun(title, ts);
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'done', title }) + '\n');
   } else if (sub === 'abandon') {
     // A run that stalled or produced no report: closed, never measured. --at is when it stopped (ISO).
     const [title, at] = [flag('title'), flag('at')];
     if (!title || (at !== undefined && Number.isNaN(Date.parse(at)))) die('usage: usage abandon --title "<run title>" [--at <ISO time it stopped>] [--note "..."]');
-    appendFileSync(P.usage, JSON.stringify({ ts, type: 'abandoned', title, at: at ? new Date(at).toISOString() : ts, note: flag('note') ?? null }) + '\n');
+    const when = at ? new Date(at).toISOString() : ts;
+    requireOpenRun(title, when);
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'abandoned', title, at: when, note: flag('note') ?? null }) + '\n');
   } else if (sub === 'plan') {
     console.log(JSON.stringify(usagePlan(readUsage()), null, 2));
     return;
   } else if (sub !== 'show') die('usage: usage snapshot|run|reading|done|abandon|plan|show');
   console.log(JSON.stringify(usageToday(readUsage()), null, 2));
+}
+
+// A closure that matches no open run would be recorded, leave the intended run open, and make every
+// later run count as overlapping it. Refuse it and name the runs that are open.
+function requireOpenRun(title, at) {
+  const ledger = readUsage();
+  if (openRunFor(ledger, title, at)) return;
+  const now = new Date().toISOString();
+  const open = [...new Set(ledger.filter((r) => r.type === 'run' && openRunFor(ledger, r.title, now)).map((r) => r.title))];
+  die(`no open run titled ${JSON.stringify(title)} at ${at}; open now: ${open.length ? open.map((t) => JSON.stringify(t)).join(', ') : 'none'}`);
 }
 
 function readJsonl(file) {
@@ -479,9 +495,15 @@ function readJsonl(file) {
 
 // Claim sampling and scoring. Records live in RESEARCH_HOME/verify/<domain>__<report>.claims.jsonl;
 // the checker (a different agent from the one that wrote the report) edits them in place.
-function claimsFileFor(target) {
-  if (target.endsWith('.jsonl')) return path.resolve(target);
-  const key = path.isAbsolute(target) ? path.relative(P.corpus, target).split(path.sep).join('/') : target;
+// The claims file is always derived from the corpus key, so `sample` writes only under RESEARCH_HOME;
+// an explicit .jsonl path is accepted by `score`, which only reads it.
+function corpusFile(keyOrPath) {
+  const file = path.resolve(P.corpus, keyOrPath);
+  const inside = file.startsWith(path.resolve(P.corpus) + path.sep);
+  return { file, inside, key: inside ? path.relative(P.corpus, file).split(path.sep).join('/') : null };
+}
+
+function claimsFileFor(key) {
   return path.join(HOME, 'verify', `${key.replace(/\.md$/, '').split('/').join('__')}.claims.jsonl`);
 }
 
@@ -490,27 +512,36 @@ function cmdVerify() {
   if (!['sample', 'score'].includes(sub) || !target) {
     die('usage: verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force] | verify score <corpus-key|claims.jsonl>');
   }
-  const claimsFile = claimsFileFor(target);
   if (sub === 'score') {
+    const claimsFile = target.endsWith('.jsonl') ? path.resolve(target) : claimsFileFor(corpusFile(target).key ?? die(`${target} is outside the corpus`));
     if (!existsSync(claimsFile)) die(`no claims file at ${claimsFile}; run "verify sample" first`);
     const records = readJsonl(claimsFile);
+    // The report is read again, so a verdict never outlives the text it was drawn from.
+    const report = records[0]?.report_key ? corpusFile(records[0].report_key) : { inside: false };
+    const digest = report.inside && existsSync(report.file) ? reportDigest(readFileSync(report.file, 'utf8')) : null;
     for (const r of records) console.log(`${String(r.status ?? 'pending').padEnd(12)} ${String(r.source_url ?? 'no-url').replace(/^https?:\/\//, '').slice(0, 70)}`);
-    console.log(JSON.stringify({ file: claimsFile, ...scoreClaims(records) }, null, 2));
+    const score = scoreClaims(records, { reportDigest: digest });
+    console.log(JSON.stringify({ file: claimsFile, report: report.key ?? null, ...score }, null, 2));
+    // A shell gate (`verify score x && publish`) must stop on a blocked release.
+    if (score.release !== 'pass') process.exit(1);
     return;
   }
-  const key = path.isAbsolute(target) ? path.relative(P.corpus, target).split(path.sep).join('/') : target;
-  const reportFile = path.resolve(P.corpus, key);
-  if (!reportFile.startsWith(path.resolve(P.corpus) + path.sep)) die(`${target} is outside the corpus`);
+  const { file: reportFile, inside, key } = corpusFile(target);
+  if (!inside) die(`${target} is outside the corpus`);
+  if (!key.endsWith('.md')) die(`${target} is not a corpus report (.md)`);
   if (!existsSync(reportFile)) die(`no report at ${reportFile}`);
+  const claimsFile = claimsFileFor(key);
   const from = flag('from') || 'auto';
   if (!['auto', 'table', 'prose', 'all'].includes(from)) die('--from must be auto, table, prose or all');
   if (existsSync(claimsFile) && !has('force') && readJsonl(claimsFile).some((r) => r.status !== 'pending')) {
     die(`${claimsFile} already holds checked claims; pass --force to resample and overwrite them`);
   }
-  const claims = extractClaims(readFileSync(reportFile, 'utf8'), { from });
+  const text = readFileSync(reportFile, 'utf8');
+  const claims = extractClaims(text, { from });
   if (!claims.length) die(`no claims with a source found in ${key}`);
   const seed = Number(flag('seed') || 1);
-  const records = claimRecords(sampleClaims(claims, Number(flag('n') || 10), seed), { reportKey: key, sampledAt: new Date().toISOString(), seed });
+  const records = claimRecords(sampleClaims(claims, Number(flag('n') || 10), seed),
+    { reportKey: key, sampledAt: new Date().toISOString(), seed, reportSha256: reportDigest(text) });
   writeAtomic(claimsFile, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
   const checklist = claimsFile.replace(/\.claims\.jsonl$/, '.checklist.md');
   writeAtomic(checklist, claimChecklist(records, { reportKey: key, claimsInReport: claims.length }));

@@ -13,7 +13,8 @@ $log = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.starlight/resea
 # scheduled-run.ps1 stops at the first failed step, logs every step and writes runs/last-run.json.
 # brief runs last and always, so a Drive failure still leaves agents a fresh model list.
 # push is left out until a Worker token is provisioned on this machine (owner's decision).
-$script = "& '$run'; node '$cli' brief *>> '$log'"
+# The refresh's exit code is kept across the brief, so Task Scheduler records a failed refresh as failed.
+$script = "try { & '$run'; `$refresh = `$LASTEXITCODE } catch { `$refresh = 1 }; node '$cli' brief *>> '$log'; if (`$refresh) { exit `$refresh }; exit `$LASTEXITCODE"
 $action = New-ScheduledTaskAction -Execute 'pwsh' -Argument "-NoProfile -Command `"$script`""
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 # 75 min covers four 15-minute steps plus the brief; doctor treats a "running" record older than that as killed.

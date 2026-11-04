@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   briefMarkdown, catalogMarkdown, classify, classifyKind, evidenceStats, chunkMarkdown, bm25Rank, corpusKey, dueDomains, frontMatter,
   localFrontMatter, routeDomain, usageToday, usagePlan, parseWorksCited, splitCitations, extractClaims, sampleClaims, claimRecords,
-  scoreClaims, pipelineHealth, claimSignals, CLAIM_SCHEMA,
+  scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, CLAIM_SCHEMA,
 } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
@@ -221,6 +225,9 @@ const REPORT = [
   String.raw`> 1. Pricing \- Trigger, [https\://trigger.dev/pricing](https://trigger.dev/pricing)  `,
   String.raw`> 2. AI SDK 7 is now available \| Vercel, [https\://vercel.com/blog/ai-sdk-7](https://vercel.com/blog/ai-sdk-7)  `,
 ].join('\n');
+const DIGEST = reportDigest(REPORT);
+// What a checker writes beside a status (synthetic).
+const EVIDENCE = { excerpt: 'verbatim source text', checked_at: '2026-11-04T12:00:00Z', checker: 'independent-checker' };
 
 test('parseWorksCited reads numbered entries with escaped titles and link targets', () => {
   const refs = parseWorksCited(REPORT);
@@ -278,18 +285,20 @@ test('sampleClaims is reproducible for a seed and spreads the sample across cate
 });
 
 test('claim records start pending with the evidence fields; scoreClaims blocks release until they pass', () => {
-  const records = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1 });
+  const records = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST });
   assert.equal(records[0].schema, CLAIM_SCHEMA);
-  for (const f of ['claim', 'source_url', 'excerpt', 'source_date', 'status', 'contradictions']) assert.ok(f in records[0], f);
-  assert.equal(scoreClaims(records).release, 'blocked');
-  const done = (statuses) => statuses.map((status, i) => ({ ...records[i % records.length], status }));
-  const pass = scoreClaims(done(['verified', 'partial', 'verified', 'unreachable']));
+  for (const f of ['claim', 'source_url', 'excerpt', 'source_date', 'status', 'contradictions', 'report_sha256']) assert.ok(f in records[0], f);
+  assert.equal(scoreClaims(records, { reportDigest: DIGEST }).release, 'blocked');
+  // Distinct ids: a repeated record is padding, not a checked claim.
+  const done = (statuses) => statuses.map((status, i) => ({ ...records[i % records.length], ...EVIDENCE, id: `d/r.md#${i}`, status }));
+  const score = (statuses) => scoreClaims(done(statuses), { reportDigest: DIGEST });
+  const pass = score(['verified', 'partial', 'verified', 'unreachable']);
   assert.equal(pass.release, 'pass');
   assert.equal(pass.checked, 3, 'unreachable sources are not counted as checked');
   assert.equal(pass.verifiedRate, 0.667);
   assert.equal(pass.supportedRate, 1);
-  assert.equal(scoreClaims(done(['verified', 'unreachable', 'unreachable'])).release, 'blocked', 'too few reachable sources to judge');
-  const bad = scoreClaims(done(['verified', 'contradicted', 'garbled']));
+  assert.equal(score(['verified', 'unreachable', 'unreachable']).release, 'blocked', 'too few reachable sources to judge');
+  const bad = score(['verified', 'contradicted', 'garbled']);
   assert.equal(bad.release, 'blocked');
   assert.equal(bad.blocks.length, 2);
 });
@@ -377,10 +386,11 @@ test('versioned names at the end of a clause are not read as citations', () => {
 });
 
 test('an emptied or trimmed claims file cannot pass the release gate', () => {
-  const recs = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1 }).map((r) => ({ ...r, status: 'verified' }));
-  assert.equal(scoreClaims(recs).release, 'pass');
-  assert.equal(scoreClaims([]).release, 'blocked');
-  assert.match(scoreClaims(recs.slice(0, 2)).blocks[0], /1 sampled record\(s\) missing/);
+  const recs = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST })
+    .map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
+  assert.equal(scoreClaims(recs, { reportDigest: DIGEST }).release, 'pass');
+  assert.equal(scoreClaims([], { reportDigest: DIGEST }).release, 'blocked');
+  assert.match(scoreClaims(recs.slice(0, 2), { reportDigest: DIGEST }).blocks[0], /1 sampled record\(s\) missing/);
 });
 
 test('a scheduled run left "running" past the scheduler limit fails the doctor', () => {
@@ -388,4 +398,186 @@ test('a scheduled run left "running" past the scheduler limit fails the doctor',
   const level = (ts) => pipelineHealth({ now, lastRun: { ts, status: 'running' } }).findings.find((f) => f.check === 'last-run').level;
   assert.equal(level('2026-11-05T08:30:00Z'), 'warn');
   assert.equal(level('2026-11-05T07:00:00Z'), 'fail');
+});
+
+// Regressions from the cross-family review of 4549d23. The CLI and script tests run against a
+// throwaway RESEARCH_HOME holding synthetic content only, never the private corpus.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PWSH = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0;
+
+function sandbox(t) {
+  const home = mkdtempSync(path.join(tmpdir(), 'research-corpus-test-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const cwd = path.join(home, 'cwd');
+  mkdirSync(cwd);
+  // A bogus remote, so a step that reached rclone by mistake fails instead of reading Drive.
+  const env = { ...process.env, RESEARCH_HOME: home, RESEARCH_DRIVE_REMOTE: 'no-such-remote:', RESEARCH_TOKEN: '' };
+  const cli = (...args) => spawnSync(process.execPath, [path.join(HERE, 'corpus.mjs'), ...args], { cwd, env, encoding: 'utf8' });
+  return { home, cwd, env, cli };
+}
+
+function sampledReport(t) {
+  const box = sandbox(t);
+  const report = path.join(box.home, 'corpus', 'd', 'r.md');
+  mkdirSync(path.dirname(report), { recursive: true });
+  writeFileSync(report, REPORT);
+  assert.equal(box.cli('verify', 'sample', 'd/r.md', '--n', '3').status, 0);
+  const claimsFile = path.join(box.home, 'verify', 'd__r.claims.jsonl');
+  const sampled = readFileSync(claimsFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const fill = (status) => writeFileSync(claimsFile, sampled.map((r) => JSON.stringify({ ...r, ...EVIDENCE, status })).join('\n') + '\n');
+  return { ...box, report, fill };
+}
+
+test('verify sample writes only under RESEARCH_HOME, even when given a .jsonl corpus key', (t) => {
+  const { home, cwd, cli } = sandbox(t);
+  mkdirSync(path.join(home, 'corpus', 'd'), { recursive: true });
+  writeFileSync(path.join(home, 'corpus', 'd', 'report.jsonl'), REPORT);
+  assert.notEqual(cli('verify', 'sample', 'd/report.jsonl').status, 0);
+  assert.equal(existsSync(path.join(cwd, 'd')), false, 'nothing is written beside the checkout');
+});
+
+test('a checked status without its evidence cannot pass the release gate', () => {
+  const recs = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST });
+  const gate = (patch) => scoreClaims(recs.map((r) => ({ ...r, ...patch })), { reportDigest: DIGEST });
+  const bare = gate({ status: 'verified' });
+  assert.equal(bare.release, 'blocked');
+  assert.match(bare.blocks.join(' '), /3 checked claim\(s\) lack evidence/);
+  assert.equal(gate({ ...EVIDENCE, status: 'verified', excerpt: ' ' }).release, 'blocked', 'a verified claim quotes its source');
+  assert.equal(gate({ ...EVIDENCE, status: 'verified', checked_at: 'yesterday' }).release, 'blocked', 'checked_at is a date');
+  assert.equal(gate({ ...EVIDENCE, status: 'verified', source_date: null }).release, 'pass');
+  assert.ok(!gate({ ...EVIDENCE, status: 'garbled', excerpt: null }).blocks.some((b) => /evidence/.test(b)), 'a garbled claim has nothing to quote');
+});
+
+test('duplicate records neither complete a sample nor dilute its failure share', () => {
+  const [one] = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST });
+  const verified = { ...one, ...EVIDENCE, status: 'verified', sample_size: 10 };
+  const padded = scoreClaims(Array.from({ length: 10 }, () => verified), { reportDigest: DIGEST });
+  assert.equal(padded.release, 'blocked');
+  assert.match(padded.blocks.join(' '), /9 sampled record\(s\) missing/);
+  assert.match(padded.blocks.join(' '), /9 duplicate record\(s\)/);
+  // Five distinct claims, two unsupported (40%), padded with copies of a verified one (2/13 = 15%).
+  const five = ['verified', 'verified', 'verified', 'unsupported', 'unsupported']
+    .map((status, i) => ({ ...one, ...EVIDENCE, id: `d/r.md#${i}`, sample_size: 5, status }));
+  assert.equal(scoreClaims([...five, ...Array.from({ length: 8 }, () => five[0])], { reportDigest: DIGEST }).release, 'blocked');
+});
+
+test('a verdict does not outlive its report: a changed body or a deleted report blocks the score', (t) => {
+  const { report, fill, cli } = sampledReport(t);
+  fill('verified');
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
+  writeFileSync(report, REPORT.replace('kind: deep-research', 'kind: deep-research\nexported: 2026-11-05T00:00:00Z'));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0, 'a front matter rewrite is not a report change');
+  writeFileSync(report, REPORT.replace('$0.10 per hour', '$0.20 per hour'));
+  const changed = cli('verify', 'score', 'd/r.md');
+  assert.equal(changed.status, 1);
+  assert.match(changed.stdout, /report changed since the sample was drawn/);
+  rmSync(report);
+  const gone = cli('verify', 'score', 'd/r.md');
+  assert.equal(gone.status, 1);
+  assert.match(gone.stdout, /report is missing from the corpus/);
+  // The pure gate holds the same rule for any caller.
+  const recs = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1 }).map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
+  assert.equal(scoreClaims(recs, { reportDigest: DIGEST }).release, 'blocked', 'a sample without a digest cannot be tied to the report');
+});
+
+test('verify score exits 1 when the release is blocked, so a shell gate stops', (t) => {
+  const { fill, cli } = sampledReport(t);
+  fill('contradicted');
+  const res = cli('verify', 'score', 'd/r.md');
+  assert.match(res.stdout, /"release": "blocked"/);
+  assert.equal(res.status, 1);
+});
+
+test('usage done and abandon refuse a title with no open run, and run and done require a title', (t) => {
+  const { home, cli } = sandbox(t);
+  const rows = () => (existsSync(path.join(home, 'gemini-usage.jsonl'))
+    ? readFileSync(path.join(home, 'gemini-usage.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length : 0);
+  assert.notEqual(cli('usage', 'done').status, 0, 'done needs a title');
+  assert.notEqual(cli('usage', 'done', '--title', 'nope').status, 0);
+  assert.notEqual(cli('usage', 'abandon', '--title', 'nope').status, 0);
+  assert.notEqual(cli('usage', 'run', '--domain', 'solana').status, 0, 'run needs a title, or nothing can close it');
+  assert.equal(rows(), 0, 'a refused command writes nothing');
+  assert.equal(cli('usage', 'run', '--domain', 'solana', '--title', 'real').status, 0);
+  assert.notEqual(cli('usage', 'done', '--title', 'typo').status, 0);
+  assert.equal(cli('usage', 'done', '--title', 'real').status, 0);
+  assert.notEqual(cli('usage', 'done', '--title', 'real').status, 0, 'a closed run is not closed twice');
+  assert.equal(rows(), 2);
+  // The retry window matches runEnd: an abandon --at inside the first run closes the first run only.
+  const retry = [
+    { ts: '2026-11-04T14:00:00Z', type: 'run', title: 't' },
+    { ts: '2026-11-04T14:30:00Z', type: 'run', title: 't' },
+    { ts: '2026-11-04T15:00:00Z', type: 'done', title: 't' },
+  ];
+  assert.equal(openRunFor(retry, 't', '2026-11-04T14:20:00Z')?.ts, '2026-11-04T14:00:00Z');
+  assert.equal(openRunFor(retry, 't', '2026-11-04T16:00:00Z'), null);
+});
+
+test('runs that share the interval between two readings are not each charged the combined rise', () => {
+  const ledger = [
+    { ts: '2026-11-04T10:00:00Z', type: 'reading', sessionPct: 0, weeklyPct: 0 },
+    { ts: '2026-11-04T10:01:00Z', type: 'run', title: 'a' },
+    { ts: '2026-11-04T10:20:00Z', type: 'done', title: 'a' },
+    { ts: '2026-11-04T10:30:00Z', type: 'run', title: 'b' },
+    { ts: '2026-11-04T10:50:00Z', type: 'done', title: 'b' },
+    { ts: '2026-11-04T11:00:00Z', type: 'reading', sessionPct: 20, weeklyPct: 4 },
+  ];
+  assert.equal(usagePlan(ledger).measuredRuns, 0);
+  assert.equal(usagePlan(ledger).weeklyPerRun, null);
+});
+
+test('a run across a meter reset is not measured, so no cost is negative or understated', () => {
+  const across = (before, after) => usagePlan([
+    { ts: '2026-11-04T10:00:00Z', type: 'reading', ...before },
+    { ts: '2026-11-04T10:01:00Z', type: 'run', title: 'x' },
+    { ts: '2026-11-04T10:40:00Z', type: 'done', title: 'x' },
+    { ts: '2026-11-04T10:41:00Z', type: 'reading', ...after },
+  ]);
+  const window = across({ sessionPct: 95, weeklyPct: 40 }, { sessionPct: 1, weeklyPct: 42 });
+  assert.equal(window.measuredRuns, 0);
+  assert.deepEqual(window.costs, []);
+  assert.equal(across({ sessionPct: 10, weeklyPct: 98 }, { sessionPct: 30, weeklyPct: 3 }).measuredRuns, 0, 'weekly reset');
+  // The window reset time passed mid-run, yet the meter still rose: the rise is not this run's cost.
+  const local = (h, m) => new Date(2026, 10, 4, h, m).toISOString();
+  const crossed = usagePlan([
+    { ts: local(18, 0), type: 'reading', sessionPct: 60, weeklyPct: 10, sessionResets: '18:30' },
+    { ts: local(18, 5), type: 'run', title: 'y' },
+    { ts: local(18, 50), type: 'done', title: 'y' },
+    { ts: local(18, 55), type: 'reading', sessionPct: 70, weeklyPct: 12 },
+  ]);
+  assert.equal(crossed.measuredRuns, 0);
+});
+
+test('the daily task keeps a failed refresh failed after the brief succeeds', { skip: !PWSH && 'pwsh not installed' }, (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'research-corpus-task-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // The exact command line register-daily.ps1 hands to Task Scheduler, run against stub steps.
+  const line = readFileSync(path.join(HERE, 'register-daily.ps1'), 'utf8').match(/^\$script = .*$/m)[0];
+  writeFileSync(path.join(dir, 'refresh-fail.ps1'), 'exit 1\n');
+  writeFileSync(path.join(dir, 'refresh-ok.ps1'), "'ok'\n");
+  writeFileSync(path.join(dir, 'brief.mjs'), '\n');
+  const exitFor = (refresh) => {
+    const harness = path.join(dir, `harness-${refresh}`);
+    writeFileSync(harness, [
+      `$run = '${path.join(dir, refresh)}'`, `$cli = '${path.join(dir, 'brief.mjs')}'`, `$log = '${path.join(dir, 'daily.log')}'`,
+      line, 'pwsh -NoProfile -Command $script', 'exit $LASTEXITCODE',
+    ].join('\n'));
+    return spawnSync('pwsh', ['-NoProfile', '-File', harness], { encoding: 'utf8' }).status;
+  };
+  assert.equal(exitFor('refresh-fail.ps1'), 1);
+  assert.equal(exitFor('refresh-ok.ps1'), 0);
+});
+
+test('an invocation skipped on the lock keeps the running record, so doctor still fails a killed run', { skip: !PWSH && 'pwsh not installed' }, (t) => {
+  const { home, env } = sandbox(t);
+  const runs = path.join(home, 'runs');
+  mkdirSync(runs);
+  writeFileSync(path.join(runs, 'scheduled-run.lock'), '4242');
+  const running = { ts: '2026-11-05T07:15:00.000Z', status: 'running', steps: [] };
+  writeFileSync(path.join(runs, 'last-run.json'), JSON.stringify(running));
+  const res = spawnSync('pwsh', ['-NoProfile', '-File', path.join(HERE, 'scheduled-run.ps1')], { env, encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  const lastRun = JSON.parse(readFileSync(path.join(runs, 'last-run.json'), 'utf8'));
+  assert.deepEqual(lastRun, running);
+  const doctor = pipelineHealth({ now: Date.parse('2026-11-05T09:00:00Z'), lastRun }).findings.find((f) => f.check === 'last-run');
+  assert.equal(doctor.level, 'fail');
 });
