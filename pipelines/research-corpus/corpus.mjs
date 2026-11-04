@@ -14,18 +14,26 @@
 //   node corpus.mjs queue                domains whose newest report is past its window
 //   node corpus.mjs usage snapshot --remaining N [--note "..."]   record a reading from the Gemini app
 //   node corpus.mjs usage run --domain <id> --title "<topic>"     log a Deep Research run
+//   node corpus.mjs usage reading --session P --weekly P [...]   record the Usage limits page (percent meter)
+//   node corpus.mjs usage done --title "<topic>"                 mark a run finished (pair with a reading after it)
+//   node corpus.mjs usage abandon --title "<topic>" [--at ISO]    close a stalled run; never measured, stops blocking others
+//   node corpus.mjs usage plan                                   measured % cost per run, runs left this window/week
 //   node corpus.mjs usage show
+//   node corpus.mjs verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force]
+//   node corpus.mjs verify score <corpus-key|claims.jsonl>        tally checked claims, release pass/blocked
+//   node corpus.mjs doctor [--skip check,check]                    silent-failure checks; exit 1 on any fail
 //
 // All private state lives in RESEARCH_HOME (default ~/.starlight/research), never in this repo.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, renameSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, renameSync, statSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
-  localFrontMatter, slugify, usageToday,
+  localFrontMatter, slugify, usageToday, usagePlan, evidenceStats, chunkMarkdown, bm25Rank,
+  extractClaims, sampleClaims, claimRecords, scoreClaims, claimChecklist, pipelineHealth,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +51,7 @@ const P = {
   listing: path.join(HOME, 'drive-listing.json'),
   inventory: path.join(HOME, 'inventory.json'),
   exclude: path.join(HOME, 'exclude.txt'),
+  excludeIds: path.join(HOME, 'exclude-ids.txt'),
   corpus: path.join(HOME, 'corpus'),
   usage: path.join(HOME, 'gemini-usage.jsonl'),
   manifest: path.join(HOME, 'push-manifest.json'),
@@ -70,7 +79,12 @@ async function worker(route, body = {}) {
   return out;
 }
 
-const domains = JSON.parse(readFileSync(path.join(HERE, 'domains.json'), 'utf8')).domains;
+// Private routing rules (brand and estate vocabulary) live beside the corpus, never in this public repo.
+// They are tried first, so an owner can route their own titles without editing the shared list.
+const localDomains = existsSync(path.join(HOME, 'domains.local.json'))
+  ? JSON.parse(readFileSync(path.join(HOME, 'domains.local.json'), 'utf8')).domains
+  : [];
+const domains = [...localDomains, ...JSON.parse(readFileSync(path.join(HERE, 'domains.json'), 'utf8')).domains];
 
 function die(msg, code = 1) { console.error(msg); process.exit(code); }
 function readJson(file, fallback) { return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : fallback; }
@@ -85,6 +99,11 @@ function writeAtomic(file, text) {
 function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
   return i > -1 ? process.argv[i + 1] : undefined;
+}
+
+// A boolean switch: `flag` returns the next argument, which is undefined when the switch comes last.
+function has(name) {
+  return process.argv.includes(`--${name}`);
 }
 
 // npx and rclone resolve to .cmd shims on Windows, which Node only spawns through a shell.
@@ -133,7 +152,9 @@ function cmdClassify() {
   const raw = readJson(source, null);
   if (!raw) die(`no listing at ${source}; run "list" first or pass a JSON file`);
   const files = Array.isArray(raw) ? raw : raw.files;
-  const inventory = classify(files, { domains, personalPatterns: personalPatterns() });
+  const blocked = new Set(existsSync(P.excludeIds) ? readFileSync(P.excludeIds, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : []);
+  const inventory = classify(files, { domains, personalPatterns: personalPatterns() })
+    .map((e) => (blocked.has(e.id) ? { ...e, kind: 'sensitive', domain: null, include: false } : e));
   writeAtomic(P.inventory, JSON.stringify(inventory, null, 2));
   const count = (pred) => inventory.filter(pred).length;
   console.log(JSON.stringify({
@@ -142,6 +163,8 @@ function cmdClassify() {
     deepResearch: count((e) => e.kind === 'deep-research' && e.include),
     geminiCanvas: count((e) => e.kind === 'gemini-canvas' && e.include),
     personalExcluded: count((e) => e.kind === 'personal'),
+    sensitiveExcluded: count((e) => e.kind === 'sensitive'),
+    supersededExcluded: count((e) => e.kind === 'superseded'),
     duplicates: count((e) => e.duplicateOf),
     unrouted: count((e) => e.include && e.domain === 'unrouted'),
   }, null, 2));
@@ -158,7 +181,8 @@ function cmdExport() {
     mkdirSync(staging, { recursive: true });
     const tmp = path.join(staging, `${entry.id}.md`);
     run('rclone', ['backend', 'copyid', RCLONE_REMOTE, entry.id, tmp, '--drive-export-formats', 'md']);
-    writeAtomic(target, frontMatter(entry, exportedAt) + readFileSync(tmp, 'utf8'));
+    const body = readFileSync(tmp, 'utf8');
+    writeAtomic(target, frontMatter(entry, exportedAt, evidenceStats(body)) + body);
     done += 1;
   }
   console.log(`exported ${done} changed document(s) -> ${P.corpus}`);
@@ -222,10 +246,139 @@ function positional() {
 
 async function cmdSearch() {
   const query = positional();
-  if (!query) die('usage: corpus.mjs search "<question>" [--domain <id>] [--limit N]');
+  if (!query) die('usage: corpus.mjs search "<question>" [--domain <id>] [--limit N] [--local]');
+  if (has('local') || !existsSync(P.workerSecrets)) return localSearch(query);
   const out = await worker('/search', { query, domain: flag('domain'), limit: Number(flag('limit') || 8) });
   for (const p of out.passages) console.log(`\n[${p.score}] ${p.key}\n${p.text.trim().slice(0, 600)}`);
   if (!out.passages.length) console.log('no passages (is the corpus indexed? run: corpus.mjs status)');
+}
+
+// BM25 over the local corpus: usable without the Worker, and the baseline a vector index must beat.
+function listCorpusFiles(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true }).flatMap((d) => {
+    const p = path.join(dir, d.name);
+    return d.isDirectory() ? listCorpusFiles(p) : d.name.endsWith('.md') ? [p] : [];
+  });
+}
+
+function buildPassages({ wanted, scope } = {}) {
+  const triage = readTriage();
+  const passages = [];
+  for (const file of listCorpusFiles(P.corpus)) {
+    const rel = path.relative(P.corpus, file).split(path.sep).join('/');
+    if (wanted && !rel.startsWith(`${wanted}/`)) continue;
+    // A reviewed document is searchable only in its own namespace; unreviewed ones stay visible.
+    const verdict = triage.get(rel);
+    if (scope && verdict?.scope !== scope) continue;
+    // Without --scope the default namespaces are research and decisions; creative and private-ops
+    // material is searched only when asked for, so manuscripts never answer a business question.
+    if (!scope && ['creative', 'private-ops'].includes(verdict?.scope)) continue;
+    if (verdict?.vectorize === 'no') continue;
+    const { meta, chunks } = chunkMarkdown(readFileSync(file, 'utf8'));
+    for (const c of chunks) passages.push({ ...c, key: rel, evidence: meta.evidence ?? 'n/a', verification: meta.verification ?? '?' });
+  }
+  return passages;
+}
+
+function localSearch(query) {
+  const passages = buildPassages({ wanted: flag('domain'), scope: flag('scope') });
+  const hits = bm25Rank(passages, query, { limit: Number(flag('limit') || 8) });
+  for (const h of hits) console.log(`${String.fromCharCode(10)}[${h.score}] ${h.key} > ${h.heading} (${h.evidence}, ${h.verification})${String.fromCharCode(10)}${h.text.slice(0, 600)}`);
+  if (!hits.length) console.log(`no local passages (${passages.length} indexed)`);
+}
+
+// Retrieval evaluation: questions live in ~/.starlight/research/eval/questions.json as
+// [{ "q": "...", "expect": ["substring of the right document key"], "scope": "optional namespace" }]. Reports hit@1, hit@5 and
+// MRR for the local BM25 baseline; any vector or hybrid index must beat these on the same file.
+function cmdEval() {
+  const file = flag('file') || path.join(HOME, 'eval', 'questions.json');
+  const questions = readJson(file, null) || die(`no questions at ${file}`);
+  const byScope = new Map();
+  const passagesFor = (scope) => { const k = scope ?? flag('scope') ?? ''; if (!byScope.has(k)) byScope.set(k, buildPassages({ scope: k || undefined })); return byScope.get(k); };
+  let h1 = 0; let h5 = 0; let rr = 0;
+  const misses = [];
+  for (const { q, expect, scope } of questions) {
+    const ranked = bm25Rank(passagesFor(scope), q, { limit: 50 });
+    const keys = [];
+    for (const p of ranked) if (!keys.includes(p.key)) keys.push(p.key);
+    const pos = keys.findIndex((k) => expect.some((e) => k.includes(e)));
+    if (pos === 0) h1 += 1;
+    if (pos >= 0 && pos < 5) h5 += 1;
+    if (pos >= 0) rr += 1 / (pos + 1); else misses.push(q);
+  }
+  const n = questions.length;
+  console.log(JSON.stringify({ questions: n, passages: passagesFor().length, hitAt1: +(h1 / n).toFixed(3), hitAt5: +(h5 / n).toFixed(3), mrr: +(rr / n).toFixed(3), misses }, null, 2));
+}
+
+function cmdAudit() {
+  const inv = readJson(P.inventory, null) || die('no inventory; run "classify" first');
+  const rows = [];
+  for (const file of listCorpusFiles(P.corpus)) {
+    const { meta } = chunkMarkdown(readFileSync(file, 'utf8'));
+    rows.push({ key: path.relative(P.corpus, file).split(path.sep).join('/'), kind: meta.kind, domain: meta.domain, evidence: meta.evidence ?? 'unknown', urls: Number(meta.source_urls ?? 0) });
+  }
+  const tally = (f) => rows.reduce((a, r) => ((a[f(r)] = (a[f(r)] ?? 0) + 1), a), {});
+  const stale = rows.filter((r) => !inv.some((e) => e.include && corpusKey(e) === r.key));
+  const out = {
+    exported: rows.length, byKind: tally((r) => r.kind), byDomain: tally((r) => r.domain), byEvidence: tally((r) => `${r.kind}/${r.evidence}`),
+    uncitedDeepResearch: rows.filter((r) => r.kind === 'deep-research' && r.evidence === 'uncited').map((r) => r.key),
+    notInInventory: stale.map((r) => r.key),
+  };
+  writeAtomic(path.join(HOME, 'audit.json'), JSON.stringify(out, null, 2));
+  console.log(JSON.stringify(out, null, 2));
+}
+
+// Removes local derived copies of documents the inventory no longer includes (reclassified as
+// sensitive or superseded). Drive originals are never touched; export recreates anything needed.
+function cmdPrune() {
+  const inv = readJson(P.inventory, null) || die('no inventory; run "classify" first');
+  const keep = new Set(inv.filter((e) => e.include).map(corpusKey));
+  let removed = 0;
+  for (const file of listCorpusFiles(P.corpus)) {
+    if (!keep.has(path.relative(P.corpus, file).split(path.sep).join('/'))) { rmSync(file); removed += 1; }
+  }
+  console.log(`pruned ${removed} local file(s) no longer in the inventory`);
+}
+
+// Triage verdicts (triage-*.jsonl, written by reviewers) decide what is indexed and in which
+// namespace. "no" documents are moved to a local quarantine folder, never deleted, and their Drive
+// ids are recorded so a later export cannot bring them back.
+function readTriage() {
+  const map = new Map();
+  const dir = path.join(HOME, 'triage');
+  if (!existsSync(dir)) return map;
+  for (const f of readdirSync(dir).filter((n) => /^triage-.*[.]jsonl$/.test(n))) {
+    for (const line of readFileSync(path.join(dir, f), 'utf8').split(/\r?\n/).filter(Boolean)) {
+      try { const r = JSON.parse(line); map.set(r.key, r); } catch { /* skip a malformed line */ }
+    }
+  }
+  return map;
+}
+
+function cmdTriage() {
+  const sub = process.argv[3] || 'summary';
+  const triage = readTriage();
+  if (sub === 'summary') {
+    const tally = (f) => [...triage.values()].reduce((a, r) => ((a[f(r)] = (a[f(r)] ?? 0) + 1), a), {});
+    console.log(JSON.stringify({ reviewed: triage.size, byTier: tally((r) => r.tier), byVectorize: tally((r) => r.vectorize), byScope: tally((r) => r.scope), byAuthority: tally((r) => r.authority) }, null, 2));
+    return;
+  }
+  if (sub !== 'apply') die('usage: triage summary|apply');
+  const quarantine = path.join(HOME, 'quarantine');
+  const ids = existsSync(P.excludeIds) ? readFileSync(P.excludeIds, 'utf8') : '';
+  let moved = 0;
+  for (const r of triage.values()) {
+    const src = path.join(P.corpus, r.key);
+    if (r.vectorize !== 'no' || !existsSync(src)) continue;
+    const id = (readFileSync(src, 'utf8').match(/^source_id: (.+)$/m) || [])[1];
+    if (id && !ids.includes(id)) appendFileSync(P.excludeIds, `${id}\n`);
+    const dest = path.join(quarantine, r.key);
+    mkdirSync(path.dirname(dest), { recursive: true });
+    renameSync(src, dest);
+    moved += 1;
+  }
+  console.log(`quarantined ${moved} document(s) to ${quarantine}; ids recorded in ${P.excludeIds}`);
 }
 
 async function cmdAsk() {
@@ -299,13 +452,97 @@ function cmdUsage() {
     const domain = flag('domain');
     if (!domains.some((d) => d.id === domain)) die(`--domain must be one of: ${domains.map((d) => d.id).join(', ')}`);
     appendFileSync(P.usage, JSON.stringify({ ts, type: 'run', domain, title: flag('title') ?? null }) + '\n');
-  } else if (sub !== 'show') die('usage: usage snapshot|run|show');
+  } else if (sub === 'reading') {
+    const [s, w] = [flag('session'), flag('weekly')];
+    if (s === undefined || w === undefined) die('usage: usage reading --session <pct> --weekly <pct> [--session-resets "19:18"] [--weekly-resets "10 Nov 15:18"] [--shot <file>]');
+    appendFileSync(P.usage, JSON.stringify({
+      ts, type: 'reading', sessionPct: Number(s), weeklyPct: Number(w),
+      sessionResets: flag('session-resets') ?? null, weeklyResets: flag('weekly-resets') ?? null, shot: flag('shot') ?? null,
+    }) + '\n');
+  } else if (sub === 'done') {
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'done', title: flag('title') ?? null }) + '\n');
+  } else if (sub === 'abandon') {
+    // A run that stalled or produced no report: closed, never measured. --at is when it stopped (ISO).
+    const [title, at] = [flag('title'), flag('at')];
+    if (!title || (at !== undefined && Number.isNaN(Date.parse(at)))) die('usage: usage abandon --title "<run title>" [--at <ISO time it stopped>] [--note "..."]');
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'abandoned', title, at: at ? new Date(at).toISOString() : ts, note: flag('note') ?? null }) + '\n');
+  } else if (sub === 'plan') {
+    console.log(JSON.stringify(usagePlan(readUsage()), null, 2));
+    return;
+  } else if (sub !== 'show') die('usage: usage snapshot|run|reading|done|abandon|plan|show');
   console.log(JSON.stringify(usageToday(readUsage()), null, 2));
+}
+
+function readJsonl(file) {
+  return readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+}
+
+// Claim sampling and scoring. Records live in RESEARCH_HOME/verify/<domain>__<report>.claims.jsonl;
+// the checker (a different agent from the one that wrote the report) edits them in place.
+function claimsFileFor(target) {
+  if (target.endsWith('.jsonl')) return path.resolve(target);
+  const key = path.isAbsolute(target) ? path.relative(P.corpus, target).split(path.sep).join('/') : target;
+  return path.join(HOME, 'verify', `${key.replace(/\.md$/, '').split('/').join('__')}.claims.jsonl`);
+}
+
+function cmdVerify() {
+  const [sub, target] = [process.argv[3], process.argv[4]];
+  if (!['sample', 'score'].includes(sub) || !target) {
+    die('usage: verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force] | verify score <corpus-key|claims.jsonl>');
+  }
+  const claimsFile = claimsFileFor(target);
+  if (sub === 'score') {
+    if (!existsSync(claimsFile)) die(`no claims file at ${claimsFile}; run "verify sample" first`);
+    const records = readJsonl(claimsFile);
+    for (const r of records) console.log(`${String(r.status ?? 'pending').padEnd(12)} ${String(r.source_url ?? 'no-url').replace(/^https?:\/\//, '').slice(0, 70)}`);
+    console.log(JSON.stringify({ file: claimsFile, ...scoreClaims(records) }, null, 2));
+    return;
+  }
+  const key = path.isAbsolute(target) ? path.relative(P.corpus, target).split(path.sep).join('/') : target;
+  const reportFile = path.resolve(P.corpus, key);
+  if (!reportFile.startsWith(path.resolve(P.corpus) + path.sep)) die(`${target} is outside the corpus`);
+  if (!existsSync(reportFile)) die(`no report at ${reportFile}`);
+  const from = flag('from') || 'auto';
+  if (!['auto', 'table', 'prose', 'all'].includes(from)) die('--from must be auto, table, prose or all');
+  if (existsSync(claimsFile) && !has('force') && readJsonl(claimsFile).some((r) => r.status !== 'pending')) {
+    die(`${claimsFile} already holds checked claims; pass --force to resample and overwrite them`);
+  }
+  const claims = extractClaims(readFileSync(reportFile, 'utf8'), { from });
+  if (!claims.length) die(`no claims with a source found in ${key}`);
+  const seed = Number(flag('seed') || 1);
+  const records = claimRecords(sampleClaims(claims, Number(flag('n') || 10), seed), { reportKey: key, sampledAt: new Date().toISOString(), seed });
+  writeAtomic(claimsFile, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const checklist = claimsFile.replace(/\.claims\.jsonl$/, '.checklist.md');
+  writeAtomic(checklist, claimChecklist(records, { reportKey: key, claimsInReport: claims.length }));
+  console.log(JSON.stringify({ report: key, claimsInReport: claims.length, sampled: records.length, seed, claimsFile, checklist,
+    signals: records.flatMap((r) => r.signals).reduce((a, s) => ((a[s] = (a[s] ?? 0) + 1), a), {}) }, null, 2));
+}
+
+function cmdDoctor() {
+  const sourceId = (file) => (readFileSync(file, 'utf8').slice(0, 4096).match(/^source_id: (.+)$/m) || [])[1]?.trim() ?? null;
+  const rel = (root, f) => path.relative(root, f).split(path.sep).join('/');
+  const quarantine = path.join(HOME, 'quarantine');
+  const lastRunFile = path.join(HOME, 'runs', 'last-run.json');
+  const report = pipelineHealth({
+    now: Date.now(),
+    corpus: listCorpusFiles(P.corpus).map((f) => ({ key: rel(P.corpus, f), sourceId: sourceId(f) })),
+    quarantineKeys: listCorpusFiles(quarantine).map((f) => rel(quarantine, f)),
+    excludedIds: existsSync(P.excludeIds) ? readFileSync(P.excludeIds, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [],
+    listingMtimeMs: existsSync(P.listing) ? statSync(P.listing).mtimeMs : null,
+    ledger: readUsage(),
+    lastRun: readJson(lastRunFile, null),
+  });
+  const skip = new Set((flag('skip') || '').split(',').filter(Boolean));
+  const findings = report.findings.filter((f) => !skip.has(f.check));
+  const ok = !findings.some((f) => f.level === 'fail');
+  console.log(JSON.stringify({ ok, findings }, null, 2));
+  if (!ok) process.exit(1);
 }
 
 const commands = {
   list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, sync: cmdSync, status: cmdStatus,
-  search: cmdSearch, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
+  search: cmdSearch, triage: cmdTriage, eval: cmdEval, audit: cmdAudit, prune: cmdPrune, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
+  verify: cmdVerify, doctor: cmdDoctor,
 };
 const cmd = commands[process.argv[2]];
 if (!cmd) die(`commands: ${Object.keys(commands).join(', ')}`, 2);
