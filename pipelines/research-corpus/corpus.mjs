@@ -19,7 +19,7 @@
 //   node corpus.mjs usage abandon --title "<topic>" [--at ISO]    close a stalled run; never measured, stops blocking others
 //   node corpus.mjs usage plan                                   measured % cost per run, runs left this window/week
 //   node corpus.mjs usage show
-//   node corpus.mjs verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force]
+//   node corpus.mjs verify sample <corpus-key> [--n 10] [--from auto|table|prose|all] [--force]   seed derived from the report
 //   node corpus.mjs verify score <corpus-key|claims.jsonl>        tally checked claims, release pass/blocked (exit 1)
 //   node corpus.mjs doctor [--skip check,check]                    silent-failure checks; exit 1 on any fail
 //
@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
   localFrontMatter, slugify, usageToday, usagePlan, evidenceStats, chunkMarkdown, bm25Rank,
-  drawSample, scoreClaims, claimChecklist, pipelineHealth, openRunFor,
+  drawSample, releaseMinimum, scoreClaims, claimChecklist, pipelineHealth, openRunFor,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -507,10 +507,15 @@ function claimsFileFor(key) {
   return path.join(HOME, 'verify', `${key.replace(/\.md$/, '').split('/').join('__')}.claims.jsonl`);
 }
 
+// Written once by `sample`, never by the checker; `score` takes the sample's parameters only from here.
+function manifestFileFor(key) {
+  return claimsFileFor(key).replace(/\.claims\.jsonl$/, '.manifest.json');
+}
+
 function cmdVerify() {
   const [sub, target] = [process.argv[3], process.argv[4]];
   if (!['sample', 'score'].includes(sub) || !target) {
-    die('usage: verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force] | verify score <corpus-key|claims.jsonl>');
+    die('usage: verify sample <corpus-key> [--n 10] [--from auto|table|prose|all] [--force] | verify score <corpus-key|claims.jsonl>');
   }
   if (sub === 'score') {
     const explicit = target.endsWith('.jsonl');
@@ -522,8 +527,10 @@ function cmdVerify() {
     // and scoreClaims requires every record to name it, so a verdict never describes other text.
     const report = corpusFile(requested ?? String(records[0]?.report_key ?? ''));
     const reportText = report.inside && existsSync(report.file) ? readFileSync(report.file, 'utf8') : null;
+    const manifestFile = report.key ? manifestFileFor(report.key) : null;
+    const manifest = manifestFile && existsSync(manifestFile) ? readJson(manifestFile, null) : null;
     for (const r of records) console.log(`${String(r.status ?? 'pending').padEnd(12)} ${String(r.source_url ?? 'no-url').replace(/^https?:\/\//, '').slice(0, 70)}`);
-    const score = scoreClaims(records, { reportKey: report.key, reportText });
+    const score = scoreClaims(records, { reportKey: report.key, reportText, manifest });
     console.log(JSON.stringify({ file: claimsFile, report: report.key, ...score }, null, 2));
     // A shell gate (`verify score x && publish`) must stop on a blocked release.
     if (score.release !== 'pass') process.exit(1);
@@ -539,14 +546,19 @@ function cmdVerify() {
   if (existsSync(claimsFile) && !has('force') && readJsonl(claimsFile).some((r) => r.status !== 'pending')) {
     die(`${claimsFile} already holds checked claims; pass --force to resample and overwrite them`);
   }
-  const seed = Number(flag('seed') || 1);
-  const { claimsInReport, records } = drawSample(readFileSync(reportFile, 'utf8'),
-    { reportKey: key, n: Number(flag('n') || 10), seed, from, sampledAt: new Date().toISOString() });
+  // The seed is derived from the report digest; a chosen seed would let a sampler pick easy claims.
+  if (has('seed')) die('--seed is no longer accepted: the seed is derived from the report digest');
+  const text = readFileSync(reportFile, 'utf8');
+  const { claimsInReport, records, manifest } = drawSample(text, { reportKey: key, n: Number(flag('n') || 10), from, sampledAt: new Date().toISOString() });
   if (!claimsInReport) die(`no claims with a source found in ${key}`);
+  const minimum = releaseMinimum(text);
+  if (records.length < minimum) die(`a sample of ${records.length} cannot pass: the release minimum for ${key} is ${minimum} claims; use --from all or a larger --n`);
   writeAtomic(claimsFile, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
   const checklist = claimsFile.replace(/\.claims\.jsonl$/, '.checklist.md');
   writeAtomic(checklist, claimChecklist(records, { reportKey: key, claimsInReport }));
-  console.log(JSON.stringify({ report: key, claimsInReport, sampled: records.length, seed, claimsFile, checklist,
+  const manifestFile = manifestFileFor(key);
+  writeAtomic(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+  console.log(JSON.stringify({ report: key, claimsInReport, sampled: records.length, seed: manifest.seed, claimsFile, checklist, manifestFile,
     signals: records.flatMap((r) => r.signals).reduce((a, s) => ((a[s] = (a[s] ?? 0) + 1), a), {}) }, null, 2));
 }
 

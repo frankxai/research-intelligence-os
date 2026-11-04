@@ -560,10 +560,13 @@ export function sampleClaims(claims, n, seed = 1) {
   return out;
 }
 
-function fnv1a(s) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i += 1) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
-  return h.toString(16).padStart(8, '0');
+function sha256(s) {
+  return createHash('sha256').update(s).digest('hex');
+}
+
+// A claim's identity: the full digest of its text and its sources, so two claims cannot share one.
+function claimId(reportKey, c) {
+  return `${reportKey}#${sha256(JSON.stringify([c.claim, c.sourceUrls]))}`;
 }
 
 // Front matter fields the pipeline rewrites on every export or import. Every other field (source_id,
@@ -578,12 +581,18 @@ export function reportDigest(markdown) {
   const stable = fm
     ? `---\n${fm[1].split('\n').filter((l) => !VOLATILE_FRONT_MATTER.test(l)).join('\n')}\n---\n${text.slice(fm[0].length)}`
     : text;
-  return createHash('sha256').update(stable).digest('hex');
+  return sha256(stable);
+}
+
+// The sample seed comes from the report digest, so nobody picks it: the same report always yields
+// the same sample, and a different seed is a different report.
+export function seedFromDigest(digest) {
+  return Number.parseInt(String(digest).slice(0, 8), 16);
 }
 
 export function claimRecords(claims, { reportKey, sampledAt, seed, from = 'auto', reportSha256 = null }) {
   return claims.map((c) => ({
-    schema: CLAIM_SCHEMA, id: `${reportKey}#${fnv1a(c.claim)}`, report_key: reportKey, report_sha256: reportSha256,
+    schema: CLAIM_SCHEMA, id: claimId(reportKey, c), report_key: reportKey, report_sha256: reportSha256,
     sample_from: from, sampled_at: sampledAt, seed,
     origin: c.origin, category: c.category, claim: c.claim, claim_raw: c.claimRaw,
     sample_size: claims.length,
@@ -593,16 +602,36 @@ export function claimRecords(claims, { reportKey, sampledAt, seed, from = 'auto'
   }));
 }
 
-// The sample `verify sample` writes and `verify score` redraws: the same report, seed, size and mode
-// always give the same records.
-export function drawSample(markdown, { reportKey, n, seed, from = 'auto', sampledAt = null }) {
-  const claims = extractClaims(markdown, { from });
-  const records = claimRecords(sampleClaims(claims, n, seed), { reportKey, sampledAt, seed, from, reportSha256: reportDigest(markdown) });
-  return { claimsInReport: claims.length, records };
+// The sampling manifest is written once by `verify sample`, beside the claims file the checker edits,
+// and `verify score` takes the sample's parameters and identities from it alone. Its self-hash catches
+// an accidental or partial edit; it is not a signature (see README, "Threat model").
+export const MANIFEST_SCHEMA = 'claim-sample/v1';
+const MANIFEST_FIELDS = ['schema', 'report_key', 'report_sha256', 'seed', 'seed_source', 'mode', 'size', 'claim_ids', 'sampled_at'];
+
+export function manifestHash(manifest) {
+  return sha256(JSON.stringify(MANIFEST_FIELDS.map((k) => [k, manifest?.[k] ?? null])));
 }
 
-// The default --n. A smaller sample can pass only when the report has fewer claims than this.
+// The sample `verify sample` writes and `verify score` redraws: the same report, size and mode always
+// give the same records, because the seed is derived from the report digest.
+export function drawSample(markdown, { reportKey, n, from = 'auto', sampledAt = null }) {
+  const digest = reportDigest(markdown);
+  const seed = seedFromDigest(digest);
+  const claims = extractClaims(markdown, { from });
+  const records = claimRecords(sampleClaims(claims, n, seed), { reportKey, sampledAt, seed, from, reportSha256: digest });
+  const body = {
+    schema: MANIFEST_SCHEMA, report_key: reportKey, report_sha256: digest, seed, seed_source: 'report_sha256',
+    mode: from, size: records.length, claim_ids: records.map((r) => r.id), sampled_at: sampledAt,
+  };
+  return { claimsInReport: claims.length, records, manifest: { ...body, manifest_sha256: manifestHash(body) } };
+}
+
+// The default --n. A smaller sample passes only when the whole report (every extraction mode) has
+// fewer claims than this, so choosing a narrow mode cannot shrink the minimum.
 const MIN_RELEASE_SAMPLE = 10;
+export function releaseMinimum(markdown) {
+  return Math.min(MIN_RELEASE_SAMPLE, extractClaims(markdown, { from: 'all' }).length);
+}
 // What a checker fills in. Every other field is redrawn from the report and must match it.
 const NOT_REDRAWN = new Set(['status', 'excerpt', 'source_date', 'contradictions', 'checked_at', 'checker', 'method', 'notes', 'sampled_at']);
 const SUPPORTED_VERDICTS = new Set(['verified', 'partial', 'contradicted']);
@@ -623,32 +652,38 @@ function citedUrls(markdown) {
   return new Set(urls.map(normUrl));
 }
 
-// The file against the sample redrawn from the report: every expected claim once, nothing else, no
-// field changed but the checker's, and no sample smaller than the release minimum.
-function sampleBlocks(records, reportKey, reportText) {
+// The manifest is checked against itself, the report and the seed derivation before anything in it is
+// trusted; then the claims file must hold exactly its claims, once each, changed only in checker fields.
+// Seed, size and mode written in the records are informational and must agree with the manifest.
+function sampleBlocks(records, reportKey, reportText, manifest) {
   const blocks = [];
-  const [first] = records;
-  const size = Number(first.sample_size) || 0;
-  const { claimsInReport, records: expected } = drawSample(reportText, { reportKey, n: size, seed: first.seed, from: first.sample_from });
-  const ids = new Set(records.map((r) => r.id));
-  const missing = expected.filter((e) => !ids.has(e.id)).length;
+  const ids = Array.isArray(manifest.claim_ids) ? manifest.claim_ids : [];
+  if (manifest.manifest_sha256 !== manifestHash(manifest)) blocks.push('the sampling manifest was edited after sampling (self-hash mismatch)');
+  if (manifest.report_key !== reportKey) blocks.push(`the sampling manifest describes ${manifest.report_key}, not ${reportKey}`);
+  if (manifest.report_sha256 !== reportDigest(reportText)) blocks.push('the report changed since the sample was drawn (body or provenance front matter): resample with --force');
+  if (manifest.seed !== seedFromDigest(manifest.report_sha256)) blocks.push('the sample seed is not the one derived from the report digest');
+  const { records: expected } = drawSample(reportText, { reportKey, n: Number(manifest.size) || 0, from: manifest.mode });
+  if (ids.length !== manifest.size || JSON.stringify(expected.map((e) => e.id)) !== JSON.stringify(ids)) {
+    blocks.push('the sampling manifest does not match the sample redrawn from the report');
+  }
+  const floor = releaseMinimum(reportText);
+  if (!(manifest.size >= floor)) blocks.push(`a sample of ${manifest.size} is below the release minimum of ${floor} claims for this report: resample with --from all or a larger --n`);
+  const present = new Set(records.map((r) => r.id));
+  const missing = ids.filter((id) => !present.has(id)).length;
   if (missing) blocks.push(`${missing} sampled record(s) missing from the file`);
-  const floor = Math.min(MIN_RELEASE_SAMPLE, claimsInReport);
-  if (size < floor) blocks.push(`a sample of ${size} is below the release minimum of ${floor} for this report: resample with a larger --n`);
+  if (records.length !== ids.length) blocks.push(`the file holds ${records.length} record(s); the manifest sampled ${ids.length}`);
   const byId = new Map(expected.map((e) => [e.id, e]));
   const altered = records.filter((r) => {
-    const e = byId.get(r.id);
+    const e = ids.includes(r.id) ? byId.get(r.id) : null;
     return !e || Object.keys(e).some((k) => !NOT_REDRAWN.has(k) && JSON.stringify(r[k]) !== JSON.stringify(e[k]));
   }).length;
-  if (altered) blocks.push(`${altered} record(s) differ from the sample redrawn from the report (claim, source or sample fields edited, or not in this sample)`);
-  const digest = reportDigest(reportText);
-  if (records.some((r) => r.report_sha256 !== digest)) blocks.push('the report changed since the sample was drawn (or the sample has no report digest): resample with --force');
+  if (altered) blocks.push(`${altered} record(s) differ from the manifest's sample (claim, source or sample fields edited, or not in this sample)`);
   return blocks;
 }
 
 // reportKey: the report the caller asked about. reportText: that report as it is now, or null when it
-// is gone. The sample is redrawn from it, so editing the file can change only what a checker fills in.
-export function scoreClaims(records, { reportKey = null, reportText = null } = {}) {
+// is gone. manifest: the sampling manifest written by `verify sample`, or null when there is none.
+export function scoreClaims(records, { reportKey = null, reportText = null, manifest = null } = {}) {
   const byStatus = Object.fromEntries(CLAIM_STATUSES.map((s) => [s, 0]));
   for (const r of records) byStatus[CLAIM_STATUSES.includes(r.status) ? r.status : 'pending'] += 1;
   const checked = records.length - byStatus.pending - byStatus.unreachable;
@@ -658,7 +693,8 @@ export function scoreClaims(records, { reportKey = null, reportText = null } = {
   const unique = new Set(records.map((r) => r.id)).size;
   if (!records.length) blocks.push('no claim records');
   else if (reportText === null) blocks.push('the report is missing from the corpus');
-  else blocks.push(...sampleBlocks(records, reportKey, reportText));
+  else if (!manifest) blocks.push('no sampling manifest for this report: resample with verify sample --force');
+  else blocks.push(...sampleBlocks(records, reportKey, reportText, manifest));
   if (unique < records.length) blocks.push(`${records.length - unique} duplicate record(s): each sampled claim counts once`);
   if (records.some((r) => r.report_key !== reportKey)) blocks.push(`record(s) describe a report other than ${reportKey}`);
   const unbacked = records.filter(lacksEvidence).length;

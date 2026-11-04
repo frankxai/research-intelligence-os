@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   briefMarkdown, catalogMarkdown, classify, classifyKind, evidenceStats, chunkMarkdown, bm25Rank, corpusKey, dueDomains, frontMatter,
   localFrontMatter, routeDomain, usageToday, usagePlan, parseWorksCited, splitCitations, extractClaims, sampleClaims, claimRecords,
-  scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, drawSample, CLAIM_SCHEMA,
+  scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, drawSample, seedFromDigest, manifestHash, CLAIM_SCHEMA,
 } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
@@ -227,13 +227,15 @@ const REPORT = [
 ].join('\n');
 // What a checker writes beside a status (synthetic).
 const EVIDENCE = { excerpt: 'verbatim source text', checked_at: '2026-11-04T12:00:00Z', checker: 'independent-checker' };
-// A synthetic report with n table claims, each citing its own source.
-const tableReport = (n) => ['---', 'title: "T"', 'kind: deep-research', '---', '# T', '',
+// A synthetic report whose claims table holds the given claims, each citing its own source.
+const tableOf = (claims) => ['---', 'title: "T"', 'kind: deep-research', '---', '# T', '',
   '| Category | Claim | Source URL |', '| :-- | :-- | :-- |',
-  ...Array.from({ length: n }, (_, i) => `| c${i % 3} | Synthetic fact number ${i} holds. | https://source${i}.example/page |`), ''].join('\n');
-// The records `verify sample` writes for a report under d/r.md, and the gate `verify score` applies.
-const sampleOf = (text, n = 10) => drawSample(text, { reportKey: 'd/r.md', n, seed: 1, sampledAt: 'now' }).records;
-const scoreOf = (records, text = REPORT) => scoreClaims(records, { reportKey: 'd/r.md', reportText: text });
+  ...claims.map((claim, i) => `| c${i % 3} | ${claim} | https://source${i}.example/page |`), ''].join('\n');
+const tableReport = (n) => tableOf(Array.from({ length: n }, (_, i) => `Synthetic fact number ${i} holds.`));
+// What `verify sample` writes for a report under d/r.md (records and manifest), and the gate `verify score` applies.
+const draw = (text, n = 10, from = 'all') => drawSample(text, { reportKey: 'd/r.md', n, from, sampledAt: 'now' });
+const sampleOf = (text, n, from) => draw(text, n, from).records;
+const scoreOf = (records, text = REPORT, manifest = draw(text).manifest) => scoreClaims(records, { reportKey: 'd/r.md', reportText: text, manifest });
 
 test('parseWorksCited reads numbered entries with escaped titles and link targets', () => {
   const refs = parseWorksCited(REPORT);
@@ -396,7 +398,7 @@ test('an emptied or trimmed claims file cannot pass the release gate', () => {
   const recs = sampleOf(REPORT).map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
   assert.equal(scoreOf(recs).release, 'pass');
   assert.equal(scoreOf([]).release, 'blocked');
-  assert.match(scoreOf(recs.slice(0, 2)).blocks[0], /1 sampled record\(s\) missing/);
+  assert.match(scoreOf(recs.slice(0, 2)).blocks[0], /3 sampled record\(s\) missing/);
 });
 
 test('a scheduled run left "running" past the scheduler limit fails the doctor', () => {
@@ -423,21 +425,23 @@ function sandbox(t) {
 }
 
 // Writes a report under `key`, samples it through the CLI, and returns ways to rewrite its claims file.
-function sampleIn(box, key, text, n = 3) {
+function sampleIn(box, key, text, { n = 10, from = 'all' } = {}) {
   const report = path.join(box.home, 'corpus', ...key.split('/'));
   mkdirSync(path.dirname(report), { recursive: true });
   writeFileSync(report, text);
-  assert.equal(box.cli('verify', 'sample', key, '--n', String(n)).status, 0);
-  const claimsFile = path.join(box.home, 'verify', `${key.replace(/\.md$/, '').split('/').join('__')}.claims.jsonl`);
+  const res = box.cli('verify', 'sample', key, '--n', String(n), '--from', from);
+  assert.equal(res.status, 0, res.stderr);
+  const stem = path.join(box.home, 'verify', key.replace(/\.md$/, '').split('/').join('__'));
+  const claimsFile = `${stem}.claims.jsonl`;
   const sampled = readFileSync(claimsFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const write = (rows) => writeFileSync(claimsFile, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   const fill = (status) => write(sampled.map((r) => ({ ...r, ...EVIDENCE, status })));
-  return { report, claimsFile, sampled, write, fill };
+  return { report, claimsFile, manifestFile: `${stem}.manifest.json`, sampled, write, fill };
 }
 
-function sampledReport(t, text = REPORT, n = 3) {
+function sampledReport(t, text = REPORT, options = {}) {
   const box = sandbox(t);
-  return { ...box, ...sampleIn(box, 'd/r.md', text, n) };
+  return { ...box, ...sampleIn(box, 'd/r.md', text, options) };
 }
 
 test('verify sample writes only under RESEARCH_HOME, even when given a .jsonl corpus key', (t) => {
@@ -453,7 +457,7 @@ test('a checked status without its evidence cannot pass the release gate', () =>
   const gate = (patch) => scoreOf(recs.map((r) => ({ ...r, ...patch })));
   const bare = gate({ status: 'verified' });
   assert.equal(bare.release, 'blocked');
-  assert.match(bare.blocks.join(' '), /3 checked claim\(s\) lack evidence/);
+  assert.match(bare.blocks.join(' '), /5 checked claim\(s\) lack evidence/);
   assert.equal(gate({ ...EVIDENCE, status: 'verified', excerpt: ' ' }).release, 'blocked', 'a verified claim quotes its source');
   assert.equal(gate({ ...EVIDENCE, status: 'verified', checked_at: 'yesterday' }).release, 'blocked', 'checked_at is a date');
   assert.equal(gate({ ...EVIDENCE, status: 'verified', source_date: null }).release, 'pass');
@@ -465,7 +469,7 @@ test('duplicate records neither complete a sample nor dilute its failure share',
   const verified = { ...one, ...EVIDENCE, status: 'verified' };
   const padded = scoreOf(Array.from({ length: 10 }, () => verified));
   assert.equal(padded.release, 'blocked');
-  assert.match(padded.blocks.join(' '), /2 sampled record\(s\) missing/);
+  assert.match(padded.blocks.join(' '), /4 sampled record\(s\) missing/);
   assert.match(padded.blocks.join(' '), /9 duplicate record\(s\)/);
   // Five distinct claims, two unsupported (40%), padded with copies of a verified one (2/13 = 15%).
   const text = tableReport(5);
@@ -594,6 +598,68 @@ test('an invocation skipped on the lock keeps the running record, so doctor stil
   assert.equal(doctor.level, 'fail');
 });
 
+// Regressions from the cross-family review of fc856d5: the sample is bound by its manifest.
+// Twenty table claims and one cited prose claim, so the modes give very different pools.
+const MIXED = `${tableReport(20)}\nA lone prose fact is cited here1.\n\n#### Works cited\n\n> 1. Prose source, [https://prose.example/1](https://prose.example/1)\n`;
+// Genuine, internally consistent rows drawn with a seed and mode of the drawer's choosing.
+const drawnWith = (text, { seed, from, n = 10 }) => claimRecords(sampleClaims(extractClaims(text, { from }), n, seed),
+  { reportKey: 'd/r.md', sampledAt: 'now', seed, from, reportSha256: reportDigest(text) }).map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
+
+test('rows drawn with another seed or a narrower mode cannot replace the manifest\'s sample', (t) => {
+  const { sampled, write, cli } = sampledReport(t, MIXED, { from: 'auto' });
+  write(sampled.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' })));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0, 'the honest sample passes');
+  const ids = JSON.stringify(sampled.map((r) => r.id).sort());
+  let seed = 2;
+  while (JSON.stringify(drawnWith(MIXED, { seed, from: 'auto' }).map((r) => r.id).sort()) === ids) seed += 1;
+  write(drawnWith(MIXED, { seed, from: 'auto' }));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 1, 'a re-drawn sample with a chosen seed');
+  write(drawnWith(MIXED, { seed: 1, from: 'prose' }));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 1, 'one prose claim instead of ten table claims');
+  assert.notEqual(cli('verify', 'sample', 'd/r.md', '--force', '--seed', '14').status, 0, 'the seed cannot be chosen');
+  assert.notEqual(cli('verify', 'sample', 'd/r.md', '--force', '--from', 'prose').status, 0, 'a narrow mode cannot shrink the minimum');
+});
+
+test('the manifest is trusted only while it matches itself, the report and the derived seed', () => {
+  const { records, manifest } = draw(MIXED);
+  const verified = records.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
+  assert.equal(scoreOf(verified, MIXED, manifest).release, 'pass');
+  assert.equal(manifest.seed, seedFromDigest(reportDigest(MIXED)));
+  assert.equal(manifest.size, 10);
+  assert.match(scoreOf(verified, MIXED, { ...manifest, size: 1 }).blocks.join(' '), /manifest was edited after sampling/);
+  const reseeded = { ...manifest, seed: 14 };
+  assert.match(scoreOf(verified, MIXED, { ...reseeded, manifest_sha256: manifestHash(reseeded) }).blocks.join(' '), /not the one derived from the report digest/);
+  assert.match(scoreOf(verified, MIXED, null).blocks.join(' '), /no sampling manifest/);
+});
+
+test('claim ids are full-length digests, so colliding short hashes cannot hide a missing claim', (t) => {
+  // These two claims share the 8-hex FNV-1a suffix the earlier ids used.
+  const claims = [...Array.from({ length: 8 }, (_, i) => `Synthetic fact number ${i} holds.`), 'liquid is present.', 'costarring is present.'];
+  const { sampled, write, cli } = sampledReport(t, tableOf(claims));
+  const pair = sampled.map((r, i) => [r.claim, i]).filter(([c]) => c === 'liquid is present.' || c === 'costarring is present.').map(([, i]) => i);
+  assert.equal(pair.length, 2);
+  assert.notEqual(sampled[pair[0]].id, sampled[pair[1]].id);
+  assert.match(sampled[0].id, /#[0-9a-f]{64}$/);
+  const verified = sampled.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
+  write(verified.filter((_, i) => i !== Math.min(...pair)));
+  const res = cli('verify', 'score', 'd/r.md');
+  assert.equal(res.status, 1, 'nine records for a ten-claim sample');
+  assert.match(res.stdout, /the file holds 9 record\(s\); the manifest sampled 10/);
+});
+
+test('updating the records\' digest does not carry verdicts across a provenance change', (t) => {
+  const withProvenance = REPORT.replace('kind: deep-research', 'kind: deep-research\nsource_id: drive-file-1\nverification: unverified-ai-synthesis');
+  const { report, sampled, write, cli } = sampledReport(t, withProvenance);
+  write(sampled.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' })));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
+  const changed = withProvenance.replace('source_id: drive-file-1', 'source_id: drive-file-2').replace('unverified-ai-synthesis', 'measured-from-provider-api');
+  writeFileSync(report, changed);
+  write(sampled.map((r) => ({ ...r, ...EVIDENCE, status: 'verified', report_sha256: reportDigest(changed) })));
+  const res = cli('verify', 'score', 'd/r.md');
+  assert.equal(res.status, 1);
+  assert.match(res.stdout, /report changed since the sample was drawn/);
+});
+
 // Regressions from the cross-family review of a5afa26.
 test('a claims file must hold the sample redrawn from the report: no copied rows, no lowered size', (t) => {
   const { sampled, write, cli } = sampledReport(t);
@@ -604,12 +670,12 @@ test('a claims file must hold the sample redrawn from the report: no copied rows
   write(verified.map((r) => ({ ...verified[0], id: r.id })));
   const copied = cli('verify', 'score', 'd/r.md');
   assert.equal(copied.status, 1);
-  assert.match(copied.stdout, /2 record\(s\) differ from the sample redrawn from the report/);
+  assert.match(copied.stdout, /4 record\(s\) differ from the manifest's sample/);
   // A trimmed file that lowers sample_size to match.
   write([{ ...verified[0], sample_size: 1 }]);
   const trimmed = cli('verify', 'score', 'd/r.md');
   assert.equal(trimmed.status, 1);
-  assert.match(trimmed.stdout, /below the release minimum of 3/);
+  assert.match(trimmed.stdout, /the file holds 1 record\(s\); the manifest sampled 5/);
 });
 
 test('verify score <key> judges only that report, never a sidecar describing another one', (t) => {
@@ -643,7 +709,7 @@ test('the report digest covers provenance front matter and exempts only pipeline
 test('a verified, partial or contradicted verdict needs a source the report cites', (t) => {
   // A fourth table row with no URL and no citation number: extracted, flagged no-source.
   const unsourced = REPORT.replace('\n\n#### **Works cited**', '\n| **Runtimes** | Agents never need a source. |  | 2026 |\n\n#### **Works cited**');
-  const { sampled, write, cli } = sampledReport(t, unsourced, 4);
+  const { sampled, write, cli } = sampledReport(t, unsourced);
   assert.ok(sampled.some((r) => r.signals.includes('no-source') && r.source_url === null));
   write(sampled.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' })));
   const res = cli('verify', 'score', 'd/r.md');
