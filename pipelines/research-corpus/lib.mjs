@@ -23,6 +23,12 @@ export const SENSITIVE_RE = /\b(financing|ondernemingsplan|business plan|qredits
 // An old revision or a copy the owner already marked as replaced must not outrank its successor.
 export const SUPERSEDED_RE = /superseded|\bduplicate\b|obsolete|deprecated|label_historical|^archive\b/i;
 
+// Every parser here splits on "\n" and "\n\n". A report saved with CRLF or lone CR line endings is read
+// as LF first, so extraction, the release minimum and the digest are the same for either form.
+export function normalizeEol(text) {
+  return String(text).replace(/\r\n?/g, '\n');
+}
+
 export function slugify(text) {
   return text
     .normalize('NFKD')
@@ -39,17 +45,26 @@ export function routeDomain(title, domains) {
   return hit ? hit.id : 'unrouted';
 }
 
+// Ordinary words that occur inside keyword phrases but name no domain on their own: "pricing" and
+// "product" fit farming as well as software, "code" and "review" fit law as well as GitHub.
+const GENERIC_TOPIC_WORDS = new Set([
+  'pricing', 'price', 'product', 'review', 'code', 'design', 'system', 'production', 'record', 'open', 'source',
+  'layer', 'front', 'end', 'next', 'brief', 'city', 'knowledge', 'science', 'stream', 'multi',
+]);
+
 // A Deep Research title that contains no keyword often still names its topic in a keyword's words:
-// "Economics of digital products" shares two of three words with "digital product pricing". Only
-// phrases of two or more words count; at least two of their words and two thirds of the phrase must
-// appear in the title, and one domain must lead outright. Otherwise the report stays unrouted.
+// "Placeholder digital pricing" shares two of three words with "digital product pricing". Only phrases
+// of two or more words count; at least two of their words and two thirds of the phrase must appear in
+// the title, at least one matched word must be specific to the topic (not in GENERIC_TOPIC_WORDS), and
+// one domain must lead outright. Otherwise the report stays unrouted.
 export function routeByTopic(title, domains) {
   const norm = (w) => (w.length > 3 ? w.replace(/s$/, '') : w);
   const words = new Set(tokenize(title).map(norm));
   const scores = domains.map((d) => Math.max(0, ...d.keywords.map((k) => {
     const phrase = [...new Set(tokenize(k).map(norm))];
-    const hit = phrase.filter((w) => words.has(w)).length;
-    return phrase.length >= 2 && hit >= 2 && hit / phrase.length >= 2 / 3 ? hit : 0;
+    const matched = phrase.filter((w) => words.has(w));
+    const specific = matched.some((w) => !GENERIC_TOPIC_WORDS.has(w));
+    return phrase.length >= 2 && matched.length >= 2 && matched.length / phrase.length >= 2 / 3 && specific ? matched.length : 0;
   })));
   const top = Math.max(0, ...scores);
   const leaders = [...new Set(domains.filter((_, i) => scores[i] === top).map((d) => d.id))];
@@ -340,7 +355,8 @@ export function evidenceStats(markdown) {
 
 // Split a corpus markdown file into passages that keep their nearest heading, so a hit can be
 // cited by section. Front matter is parsed into fields and kept out of the passages.
-export function chunkMarkdown(text, maxChars = 1200) {
+export function chunkMarkdown(raw, maxChars = 1200) {
+  const text = normalizeEol(raw);
   let body = text;
   const meta = {};
   const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
@@ -534,7 +550,8 @@ function proseClaims(body, worksCited, maxRef) {
 }
 
 // from: 'auto' (the claims table when the report has one, otherwise cited prose), 'table', 'prose' or 'all'.
-export function extractClaims(markdown, { from = 'auto' } = {}) {
+export function extractClaims(raw, { from = 'auto' } = {}) {
+  const markdown = normalizeEol(raw);
   const worksCited = parseWorksCited(markdown);
   const fm = markdown.match(/^---\n[\s\S]*?\n---\n/);
   const body = markdown.slice(fm ? fm[0].length : 0).split(WORKS_CITED_RE)[0];
@@ -594,7 +611,7 @@ const VOLATILE_FRONT_MATTER = /^(exported|imported|generated):/;
 // The digest of the report the claims were drawn from: the whole file except the volatile timestamps,
 // so a re-export that only rewrites `exported:` keeps it and any other change breaks it.
 export function reportDigest(markdown) {
-  const text = String(markdown);
+  const text = normalizeEol(markdown);
   const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
   const stable = fm
     ? `---\n${fm[1].split('\n').filter((l) => !VOLATILE_FRONT_MATTER.test(l)).join('\n')}\n---\n${text.slice(fm[0].length)}`
@@ -701,7 +718,8 @@ function sampleBlocks(records, reportKey, reportText, manifest) {
 
 // reportKey: the report the caller asked about. reportText: that report as it is now, or null when it
 // is gone. manifest: the sampling manifest written by `verify sample`, or null when there is none.
-export function scoreClaims(records, { reportKey = null, reportText = null, manifest = null } = {}) {
+export function scoreClaims(records, { reportKey = null, reportText: raw = null, manifest = null } = {}) {
+  const reportText = raw === null ? null : normalizeEol(raw);
   const byStatus = Object.fromEntries(CLAIM_STATUSES.map((s) => [s, 0]));
   for (const r of records) byStatus[CLAIM_STATUSES.includes(r.status) ? r.status : 'pending'] += 1;
   const checked = records.length - byStatus.pending - byStatus.unreachable;

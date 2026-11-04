@@ -30,7 +30,7 @@ Turns Gemini Deep Research reports, estate documents and live model catalogs int
 
 | Command | Does |
 |---|---|
-| `node corpus.mjs list` · `classify` · `export` | Drive listing → inventory (kind, domain, re-run dedupe, personal exclusion) → markdown export. A Deep Research title that contains no `domains.json` keyword is routed by the words of a multi-word keyword it shares (two words and two thirds of the phrase, one domain clearly ahead); otherwise it stays `unrouted` |
+| `node corpus.mjs list` · `classify` · `export` | Drive listing → inventory (kind, domain, re-run dedupe, personal exclusion) → markdown export. A Deep Research title that contains no `domains.json` keyword is routed by the words of a multi-word keyword it shares (two words and two thirds of the phrase, at least one of them topic-specific rather than a generic word such as pricing, product, code or review, one domain clearly ahead); otherwise it stays `unrouted` |
 | `node corpus.mjs import <f.md>... --domain <id>` | brings local or repo docs in with path and commit provenance |
 | `node corpus.mjs push` | uploads changed files to R2 and triggers `/sync` |
 | `node corpus.mjs sync` · `status` | Worker: copy R2 into AI Search · indexing state per item |
@@ -54,7 +54,7 @@ A report is trusted claim by claim, not as a document. `verify sample <key> [--n
 - `<domain>__<report>.checklist.md`, the same claims for reading;
 - `<domain>__<report>.manifest.json` (schema `claim-sample/v1`), written once and never edited by the checker: the report key, the report digest (body and front matter, minus the `exported`, `imported` and `generated` timestamps), the seed, the size, the mode, the sampled claim ids in order, and a self-hash.
 
-The seed is derived from the report digest, so nobody chooses it; `--seed` is refused. Claim ids are the full SHA-256 of the claim text and its sources. A sample smaller than the release minimum (10 claims, or every claim in a shorter report, counted across all modes so a narrow `--from` cannot lower it) is refused. Deterministic signals come first: `spacing-lost` (the export dropped spaces between dollar signs, so numbers are suspect), `url-not-in-works-cited`, `ref-differs-from-source-url`, `no-source`.
+Reports are read with CRLF and lone CR line endings turned into LF first, so extraction, the release minimum and the digest are the same whichever line endings a file was saved with. The seed is derived from the report digest, so nobody chooses it; `--seed` is refused. Claim ids are the full SHA-256 of the claim text and its sources. A sample smaller than the release minimum (10 claims, or every claim in a shorter report, counted across all modes so a narrow `--from` cannot lower it) is refused. Deterministic signals come first: `spacing-lost` (the export dropped spaces between dollar signs, so numbers are suspect), `url-not-in-works-cited`, `ref-differs-from-source-url`, `no-source`.
 
 A checker that did not write the report fetches each source and sets `status` to `verified`, `partial`, `unsupported`, `contradicted`, `garbled` or `unreachable`, and fills `checker` and `checked_at`; `verified`, `partial` and `contradicted` also need a verbatim `excerpt` and a source URL the report cites, so a claim flagged `no-source` can only be `unsupported`, `garbled` or `unreachable`. `source_date` is recorded when the source has one and is not required. The checker edits only `status`, `excerpt`, `source_date`, `contradictions`, `checked_at`, `checker`, `method` and `notes`.
 

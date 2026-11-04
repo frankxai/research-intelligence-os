@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   briefMarkdown, catalogMarkdown, classify, classifyKind, evidenceStats, chunkMarkdown, bm25Rank, corpusKey, dueDomains, frontMatter,
   localFrontMatter, routeDomain, routeByTopic, usageToday, usagePlan, parseWorksCited, splitCitations, extractClaims, sampleClaims, claimRecords,
-  scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, drawSample, seedFromDigest, manifestHash, CLAIM_SCHEMA,
+  scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, drawSample, seedFromDigest, manifestHash, releaseMinimum, CLAIM_SCHEMA,
 } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
@@ -17,33 +17,33 @@ const doc = (id, title, fileSize, createdTime = '2026-10-28T10:00:00Z') =>
   ({ id, title, mimeType: DOC, fileSize: String(fileSize), createdTime, modifiedTime: createdTime });
 
 test('a long untitled-style Doc is a Deep Research report routed by keyword', () => {
-  const [e] = classify([doc('a', 'AI Agent Knowledge Layers Architecture', 217676)], { domains });
+  const [e] = classify([doc('a', 'Placeholder Agent Runtime Survey', 217676)], { domains });
   assert.equal(e.kind, 'deep-research');
   assert.equal(e.domain, 'ai-models-platforms');
   assert.equal(e.include, true);
 });
 
 test('a short Codex/Blueprint Doc is a Gemini write-up, not research evidence', () => {
-  const [e] = classify([doc('b', 'Sonic OS — Master Blueprint & AI Agent Directive', 9683)], { domains });
+  const [e] = classify([doc('b', 'Placeholder Master Blueprint', 9683)], { domains });
   assert.equal(e.kind, 'gemini-canvas');
 });
 
 test('personal documents are excluded and get no domain', () => {
-  const [e] = classify([doc('c', 'Self-Analysis_-_Frank__v6_', 32489)], { domains });
+  const [e] = classify([doc('c', 'Self-Analysis_-_Placeholder_v1_', 32489)], { domains });
   assert.equal(e.kind, 'personal');
   assert.equal(e.include, false);
   assert.equal(e.domain, null);
 });
 
 test('owner-supplied patterns exclude private titles the defaults miss', () => {
-  const [e] = classify([doc('d', 'Our Horizon & Sanctuary', 30000)], { domains, personalPatterns: ['sanctuary'] });
+  const [e] = classify([doc('d', 'Placeholder Sanctuary Notes', 30000)], { domains, personalPatterns: ['sanctuary'] });
   assert.equal(e.include, false);
 });
 
 test('a report exported or re-run under the same title keeps only the newest copy', () => {
   const out = classify([
-    doc('early', 'Future of Human Evolution', 41033, '2026-10-28T21:45:57Z'),
-    doc('late', 'Future of Human Evolution', 33747, '2026-10-28T21:49:38Z'),
+    doc('early', 'Placeholder Report Title', 41033, '2026-10-28T21:45:57Z'),
+    doc('late', 'Placeholder Report Title', 33747, '2026-10-28T21:49:38Z'),
   ], { domains });
   const early = out.find((e) => e.id === 'early');
   assert.equal(early.duplicateOf, 'late');
@@ -52,12 +52,12 @@ test('a report exported or re-run under the same title keeps only the newest cop
 });
 
 test('a dossier or decision write-up is not mistaken for Deep Research', () => {
-  const [e] = classify([doc('h', 'FrankX — Editorial Intelligence — Curated Dossier', 25644)], { domains });
+  const [e] = classify([doc('h', 'Placeholder Curated Dossier', 25644)], { domains });
   assert.equal(e.kind, 'gemini-canvas');
 });
 
 test('unknown size (rclone reports -1) falls back to the title', () => {
-  const [e] = classify([{ ...doc('e', 'Future of Human Evolution', 0), fileSize: -1 }], { domains });
+  const [e] = classify([{ ...doc('e', 'Placeholder Report Title', 0), fileSize: -1 }], { domains });
   assert.equal(e.kind, 'deep-research');
 });
 
@@ -66,41 +66,49 @@ test('routeDomain returns unrouted when nothing matches', () => {
 });
 
 test('agentic-income-streams routes monetization and pack reports before generic agent keyword', () => {
-  const [report] = classify([doc('inc1', 'Agentic Income Streams and Polar.sh Pack Economics', 142000)], { domains });
+  const [report] = classify([doc('inc1', 'Placeholder Agentic Income Survey', 142000)], { domains });
   assert.equal(report.kind, 'deep-research');
   assert.equal(report.domain, 'agentic-income-streams');
-  const [runtime] = classify([doc('rt1', 'AI Agent Knowledge Layers Architecture', 217676)], { domains });
+  const [runtime] = classify([doc('rt1', 'Placeholder Agent Runtime Survey', 217676)], { domains });
   assert.equal(runtime.domain, 'ai-models-platforms');
 });
 
 test('an unrouted Deep Research title is routed by the words of a keyword phrase it shares', () => {
-  const [income] = classify([doc('t1', 'Economics of Digital Products in the AI Era', 90000)], { domains });
+  const [income] = classify([doc('t1', 'Placeholder Title: Digital Pricing', 90000)], { domains });
   assert.equal(income.kind, 'deep-research');
-  assert.equal(income.domain, 'agentic-income-streams', 'two of the three words of "digital product pricing"');
+  assert.equal(income.domain, 'agentic-income-streams', 'two of the three words of "digital product pricing", one of them specific');
   assert.equal(routeDomain(income.title, domains), 'unrouted', 'no keyword occurs in the title as written');
 });
 
 test('the topic fallback is conservative: one shared word, a tie or a write-up stays unrouted', () => {
-  const [one] = classify([doc('t2', 'Product Roadmap Framework', 90000)], { domains });
-  assert.equal(one.domain, 'unrouted', 'a single shared word is not a topic');
+  const [one] = classify([doc('t2', 'Placeholder Roadmap Framework', 90000)], { domains });
+  assert.equal(one.domain, 'unrouted', 'no shared phrase words');
   const rivals = [{ id: 'x', keywords: ['alpha beta'] }, { id: 'y', keywords: ['beta alpha gamma'] }];
   assert.equal(routeByTopic('Alpha and Beta', rivals), 'unrouted', 'two domains lead equally');
   assert.equal(routeByTopic('Alpha and Beta', [rivals[0], { id: 'x', keywords: ['alpha beta delta'] }]), 'x', 'one domain listed twice is not a tie');
-  const [canvas] = classify([doc('t3', 'Economics of Digital Products Blueprint', 9000)], { domains });
+  const [canvas] = classify([doc('t3', 'Placeholder Digital Pricing Blueprint', 9000)], { domains });
   assert.equal(canvas.kind, 'gemini-canvas');
   assert.equal(canvas.domain, 'unrouted', 'only Deep Research reports take the fallback');
 });
 
+test('the topic fallback needs a topic-specific word, not only generic ones like pricing, product, code or review', () => {
+  for (const title of ['Pricing of Agricultural Products', 'Review of Industrial Code and Ethics']) {
+    const [e] = classify([doc('neg', title, 90000)], { domains });
+    assert.equal(e.kind, 'deep-research');
+    assert.equal(e.domain, 'unrouted', title);
+  }
+});
+
 test('front matter marks every report as unverified AI synthesis', () => {
-  const [e] = classify([doc('f', 'Cloudflare and Vercel Architecture Hub', 364108)], { domains });
+  const [e] = classify([doc('f', 'Placeholder Vercel Platform Survey', 364108)], { domains });
   const fm = frontMatter(e, '2026-11-01T00:00:00Z');
   assert.match(fm, /verification: unverified-ai-synthesis/);
   assert.match(fm, /producer: gemini-deep-research/);
-  assert.equal(corpusKey(e), 'ai-models-platforms/2026-10-28-cloudflare-and-vercel-architecture-hub.md');
+  assert.equal(corpusKey(e), 'ai-models-platforms/2026-10-28-placeholder-vercel-platform-survey.md');
 });
 
 test('a domain is due when never researched or older than its window', () => {
-  const inventory = classify([doc('g', 'Solana validator economics deep dive', 50000, '2026-10-01T00:00:00Z')], { domains });
+  const inventory = classify([doc('g', 'Placeholder Solana survey', 50000, '2026-10-01T00:00:00Z')], { domains });
   const now = Date.parse('2026-11-01T00:00:00Z');
   const due = dueDomains(inventory, domains, now);
   const solana = due.find((d) => d.id === 'solana');
@@ -205,8 +213,8 @@ test('classifyKind treats rclone-exported native Docs (markdown, size -1) as doc
 
 test('classifyKind excludes sensitive business records and superseded copies', () => {
   const doc = (title) => ({ title, mimeType: 'text/markdown; charset=utf-8', fileSize: -1 });
-  assert.equal(classifyKind(doc('Reconciled financing package rev4'), []), 'sensitive');
-  assert.equal(classifyKind(doc('Meeting started 2026/07/14 - Notes by Gemini'), []), 'sensitive');
+  assert.equal(classifyKind(doc('Placeholder financing package'), []), 'sensitive');
+  assert.equal(classifyKind(doc('Meeting started 2000/01/01 - Notes by Gemini'), []), 'sensitive');
   assert.equal(classifyKind(doc('14 SUPERSEDED by 15 plan'), []), 'superseded');
   assert.equal(classifyKind(doc('Old research [SUPERSEDED_BY_REV4.1]'), []), 'superseded');
   assert.equal(classifyKind(doc('Archive - old research'), []), 'superseded');
@@ -766,4 +774,44 @@ test('a reading inside the interval that shows a fall or announces a reset exclu
     { ts: at(12, 45), type: 'reading', sessionPct: 20, weeklyPct: 3, weeklyResets: '10 Nov 15:18' },
   ]);
   assert.equal(later.measuredRuns, 1);
+});
+
+// Regressions from the cross-family review of a3a1186: line endings. A synthetic body with three table
+// claims and four cited prose claims, so the release minimum is seven whatever the line endings.
+const EOL_BODY = ['# Placeholder', '',
+  ...['one', 'two', 'three', 'four'].flatMap((w, i) => [`Placeholder prose fact ${w} is cited here${i + 1}.`, '']),
+  '| Category | Claim | Source URL |', '| :-- | :-- | :-- |',
+  ...['zero', 'one', 'two'].map((w, i) => `| c${i} | Placeholder table fact ${w} holds. | https://table${i}.example/page |`), '',
+  '#### Works cited', '',
+  ...[1, 2, 3, 4].map((n) => `> ${n}. Placeholder source ${n}, [https://prose${n}.example/p](https://prose${n}.example/p)`), ''];
+const LF_FRONT = '---\ntitle: "Placeholder"\nkind: deep-research\n---\n';
+const LF_REPORT = LF_FRONT + EOL_BODY.join('\n');
+const crlfReport = (exported) => ['---', 'title: "Placeholder"', 'kind: deep-research', `exported: ${exported}`, '---', ...EOL_BODY].join('\r\n');
+
+test('a CRLF body does not hide cited claims from the release minimum (LF front matter, CRLF body)', () => {
+  const mixed = LF_FRONT + EOL_BODY.join('\r\n');
+  assert.equal(releaseMinimum(LF_REPORT), 7);
+  assert.equal(releaseMinimum(mixed), 7, 'three table claims and four cited prose claims');
+  assert.deepEqual(extractClaims(mixed, { from: 'all' }).map((c) => c.claim), extractClaims(LF_REPORT, { from: 'all' }).map((c) => c.claim));
+  assert.equal(reportDigest(mixed), reportDigest(LF_REPORT));
+  // The three table claims alone, all verified, stay below the minimum.
+  const { records, manifest } = drawSample(mixed, { reportKey: 'd/r.md', n: 10, from: 'auto', sampledAt: 'now' });
+  assert.equal(records.length, 3);
+  const gate = scoreClaims(records.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' })), { reportKey: 'd/r.md', reportText: mixed, manifest });
+  assert.equal(gate.release, 'blocked');
+  assert.match(gate.blocks.join(' '), /below the release minimum of 7/);
+});
+
+test('a CRLF report keeps its digest when only exported: changes, and its front matter parses', (t) => {
+  const first = crlfReport('2026-11-04T00:00:00Z');
+  assert.equal(reportDigest(first), reportDigest(crlfReport('2026-11-05T00:00:00Z')));
+  assert.notEqual(reportDigest(first), reportDigest(first.replace('kind: deep-research', 'kind: gemini-canvas')));
+  assert.equal(reportDigest(first.replace(/\r\n/g, '\r')), reportDigest(first.replace(/\r\n/g, '\n')), 'lone CR reads as LF');
+  assert.equal(chunkMarkdown(first).meta.kind, 'deep-research');
+  // End to end: a verdict on a CRLF report survives a re-export that only rewrites the timestamp.
+  const { report, fill, cli } = sampledReport(t, first);
+  fill('verified');
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
+  writeFileSync(report, crlfReport('2026-11-06T00:00:00Z'));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
 });
