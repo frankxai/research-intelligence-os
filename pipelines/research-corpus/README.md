@@ -2,6 +2,19 @@
 
 Turns Gemini Deep Research reports, estate documents and live model catalogs into one searchable corpus that cloud agents and local CLI agents query the same way. Every new Claude Code session also starts with a brief: newest models, newest research, research that is due.
 
+## Registry preflight
+
+Checked 2026-11-04 against `frankxai/agentic-ops` `registry/` at `81a93236cf00`:
+
+| Item | Registry authority | Status |
+|---|---|---|
+| This pipeline (method code in this repo) | `repo_research_intelligence_os`: `research_workflow_methods: canonical`, `data_class: public_code_only` | Authorized. The repo holds code only; no corpus content, titles or Drive IDs. |
+| The private corpus (`~/.starlight/research`, R2 `starlight-research-corpus`) | No `artifact_authorities` entry | **Proposal.** Not a registered artifact. |
+| The `starlight-research` Worker and AI Search instance | No `artifact_authorities` or infrastructure entry | **Proposal.** Running as a personal research tool, not a product surface. |
+| `exclusions.yaml` | No match for this repo or corpus | Clear. |
+
+The proposed registry row: an `artifact_estate_research_corpus` entry with `data_class: private`, owner Frank, canonical store R2 `starlight-research-corpus`, consumer surfaces the Worker and local CLIs. It lands in `agentic-ops` when Frank accepts it. Until then nothing here is a product, and no public surface depends on it.
+
 ```text
  Google Drive (Deep Research)   estate / repo docs     provider model APIs
         │ rclone drive.readonly       │ import              │ brief

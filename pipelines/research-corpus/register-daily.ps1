@@ -9,8 +9,10 @@ if ($Remove) { Unregister-ScheduledTask -TaskName $name -Confirm:$false; "remove
 
 $cli = Join-Path $PSScriptRoot 'corpus.mjs'
 $log = Join-Path $HOME '.starlight/research/daily.log'
-# brief runs last and always, so a Drive or R2 failure still leaves agents a fresh model list.
-$script = "node '$cli' list; node '$cli' classify; node '$cli' export; node '$cli' push; node '$cli' brief *>> '$log'"
+# brief runs before push because it writes _platform/latest-models.md into the corpus, which push
+# then uploads; ';' keeps every step running after an earlier failure, so a Drive outage still
+# refreshes the model list. The script block sends every step's output to the log, not only the last.
+$script = "& { node '$cli' list; node '$cli' classify; node '$cli' export; node '$cli' brief; node '$cli' push } *>> '$log'"
 $action = New-ScheduledTaskAction -Execute 'pwsh' -Argument "-NoProfile -Command `"$script`""
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 20)

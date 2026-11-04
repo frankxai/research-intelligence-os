@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, usageToday } from './lib.mjs';
+import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, importKey, localFrontMatter, routeDomain, usageToday } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
 const DOC = 'application/vnd.google-apps.document';
@@ -127,4 +127,22 @@ test('the brief degrades honestly when catalogs are unavailable', () => {
   const md = briefMarkdown({ now: new Date('2026-11-01T00:00:00Z'), workersAi: null, gateway: null, inventory: [], due: [], usage: { runs: 0, lastSnapshot: null } });
   assert.match(md, /Workers AI: catalog unavailable/);
   assert.match(md, /No app reading recorded yet/);
+});
+
+test('importKey keeps two README files from different repos apart', () => {
+  const a = importKey({ domain: 'business-strategy', sourcePath: String.raw`C:\r\alpha\README.md`, repoRoot: 'C:/r/alpha' });
+  const b = importKey({ domain: 'business-strategy', sourcePath: 'C:/r/beta/README.md', repoRoot: 'C:/r/beta' });
+  assert.equal(a, 'business-strategy/estate-alpha-readme.md');
+  assert.equal(b, 'business-strategy/estate-beta-readme.md');
+});
+
+test('importKey separates same-named files in different folders of one repo', () => {
+  const root = 'C:/r/alpha';
+  const top = importKey({ domain: 'marketing', sourcePath: `${root}/README.md`, repoRoot: root });
+  const nested = importKey({ domain: 'marketing', sourcePath: `${root}/docs/README.md`, repoRoot: root });
+  assert.notEqual(top, nested);
+});
+
+test('importKey outside a git repo falls back to the parent folder name', () => {
+  assert.equal(importKey({ domain: 'marketing', sourcePath: 'C:/notes/brief.md', repoRoot: null }), 'marketing/estate-notes-brief.md');
 });

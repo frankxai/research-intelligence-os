@@ -95,6 +95,17 @@ export function frontMatter(entry, exportedAt) {
 
 // Local files (estate truth, repo docs, intel briefs) enter the corpus with the path and commit
 // they were read from, so an agent can tell a reviewed file from a working-tree draft.
+// The key carries the source repository and the path inside it, so two README.md files from
+// different repos (or different folders) can no longer overwrite each other.
+export function importKey({ domain, sourcePath, repoRoot }) {
+  const norm = (p) => p.split('\\').join('/');
+  const file = norm(sourcePath);
+  const root = repoRoot ? norm(repoRoot).replace(/\/$/, '') : file.split('/').slice(0, -1).join('/');
+  const repo = root.split('/').pop();
+  const rel = file.startsWith(`${root}/`) ? file.slice(root.length + 1) : file.split('/').pop();
+  return `${domain}/estate-${slugify(repo)}-${slugify(rel.replace(/\.md$/i, ''))}.md`;
+}
+
 export function localFrontMatter({ title, sourcePath, commit, domain, kind, modified }, importedAt) {
   return [
     '---',

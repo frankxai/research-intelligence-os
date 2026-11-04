@@ -25,7 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
-  localFrontMatter, slugify, usageToday,
+  importKey, localFrontMatter, usageToday,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -185,7 +185,9 @@ function cmdImport() {
     const title = (text.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(file, '.md')).trim();
     const modified = statSync(file).mtime.toISOString();
     const commit = gitCommitFor(file);
-    const target = path.join(P.corpus, domain, `estate-${slugify(path.basename(file, '.md'))}.md`);
+    const top = spawnSync('git', ['-C', path.dirname(file), 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+    const repoRoot = top.status === 0 ? top.stdout.trim() : null;
+    const target = path.join(P.corpus, importKey({ domain, sourcePath: file, repoRoot }));
     writeAtomic(target, localFrontMatter({ title, sourcePath: file, commit, domain, kind, modified }, importedAt) + text);
     console.log(`${commit ? 'committed' : 'DRAFT    '} ${path.relative(P.corpus, target)}`);
   }
@@ -211,7 +213,12 @@ async function cmdPush() {
   }
   writeAtomic(P.manifest, JSON.stringify(manifest, null, 2));
   console.log(`pushed ${pushed} file(s) to r2://${BUCKET}`);
-  if (pushed && workerToken()) console.log(JSON.stringify(await worker('/sync'), null, 2));
+  // Sync runs even when nothing was uploaded: the Worker skips unchanged etags, so this costs
+  // little, and it is the only retry path when an earlier sync failed after a successful upload.
+  if (!workerToken()) return;
+  const result = await worker('/sync');
+  console.log(JSON.stringify(result, null, 2));
+  if (result.failed?.length) die(`${result.failed.length} document(s) failed to index; rerun push to retry`);
 }
 
 function positional() {

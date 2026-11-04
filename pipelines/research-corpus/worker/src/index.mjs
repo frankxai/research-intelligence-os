@@ -35,9 +35,13 @@ async function authorized(request, env) {
 async function instance(env) {
   const existing = await env.AI_SEARCH.list();
   const ids = (existing?.result ?? existing ?? []).map((i) => i.id ?? i.name);
-  if (!ids.includes(env.INSTANCE)) await env.AI_SEARCH.create({ id: env.INSTANCE });
-  return env.AI_SEARCH.get(env.INSTANCE);
+  const created = !ids.includes(env.INSTANCE);
+  if (created) await env.AI_SEARCH.create({ id: env.INSTANCE });
+  return { target: env.AI_SEARCH.get(env.INSTANCE), created };
 }
+
+// Folder "starts with" range from the AI Search filtering docs: matches every key under domain/.
+const domainFilter = (domain) => ({ folder: { $gte: `${domain}/`, $lt: `${domain}0` } });
 
 async function listCorpus(env, prefix) {
   const objects = [];
@@ -51,9 +55,10 @@ async function listCorpus(env, prefix) {
 }
 
 async function sync(env) {
-  const target = await instance(env);
+  const { target, created } = await instance(env);
   const stateObj = await env.CORPUS.get(STATE_KEY);
-  const state = stateObj ? await stateObj.json() : {};
+  // A freshly created index is empty, so etags recorded for the previous one must not skip uploads.
+  const state = stateObj && !created ? await stateObj.json() : {};
   const uploaded = [];
   const failed = [];
   for (const obj of await listCorpus(env)) {
@@ -92,18 +97,17 @@ async function search(env, { query, domain, limit = 8 }) {
 async function ask(env, { question, domain }) {
   if (!question) throw new Error('question is required');
   const target = env.AI_SEARCH.get(env.INSTANCE);
-  const scoped = domain ? `${question}\n(Restrict to the ${domain} domain.)` : question;
+  const retrieval = { max_num_results: 10, ...(domain ? { filters: domainFilter(domain) } : {}) };
   const res = await target.chatCompletions({
     model: env.ANSWER_MODEL,
-    messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: scoped }],
-    ai_search_options: { retrieval: { max_num_results: 10 }, query_rewrite: { enabled: true } },
+    messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: question }],
+    ai_search_options: { retrieval, query_rewrite: { enabled: true } },
   });
-  return {
-    question,
-    answer: res.choices?.[0]?.message?.content ?? '',
-    sources: shapeChunks(res.chunks, null, 10).map(({ key, score }) => ({ key, score })),
-    model: res.model ?? env.ANSWER_MODEL,
-  };
+  const sources = shapeChunks(res.chunks, null, 10).map(({ key, score }) => ({ key, score }));
+  // Fail closed: an answer grounded in another domain's documents is not a domain-scoped answer.
+  const leaked = domain ? sources.filter((s) => !s.key?.startsWith(`${domain}/`)) : [];
+  if (leaked.length) throw new Error(`domain filter not honoured: ${leaked.length} source(s) outside ${domain}/`);
+  return { question, answer: res.choices?.[0]?.message?.content ?? '', sources, model: res.model ?? env.ANSWER_MODEL };
 }
 
 async function status(env) {
