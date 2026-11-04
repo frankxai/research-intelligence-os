@@ -39,6 +39,23 @@ export function routeDomain(title, domains) {
   return hit ? hit.id : 'unrouted';
 }
 
+// A Deep Research title that contains no keyword often still names its topic in a keyword's words:
+// "Economics of digital products" shares two of three words with "digital product pricing". Only
+// phrases of two or more words count; at least two of their words and two thirds of the phrase must
+// appear in the title, and one domain must lead outright. Otherwise the report stays unrouted.
+export function routeByTopic(title, domains) {
+  const norm = (w) => (w.length > 3 ? w.replace(/s$/, '') : w);
+  const words = new Set(tokenize(title).map(norm));
+  const scores = domains.map((d) => Math.max(0, ...d.keywords.map((k) => {
+    const phrase = [...new Set(tokenize(k).map(norm))];
+    const hit = phrase.filter((w) => words.has(w)).length;
+    return phrase.length >= 2 && hit >= 2 && hit / phrase.length >= 2 / 3 ? hit : 0;
+  })));
+  const top = Math.max(0, ...scores);
+  const leaders = [...new Set(domains.filter((_, i) => scores[i] === top).map((d) => d.id))];
+  return top > 0 && leaders.length === 1 ? leaders[0] : 'unrouted';
+}
+
 export function classifyKind(file, personalPatterns) {
   const lower = file.title.toLowerCase();
   if (personalPatterns.some((p) => p && lower.includes(p.toLowerCase()))) return 'personal';
@@ -71,11 +88,12 @@ export function classify(files, { domains, personalPatterns = DEFAULT_PERSONAL_P
     const duplicateOf = seen.get(key) ?? null;
     if (!duplicateOf) seen.set(key, file.id);
     const include = (kind === 'deep-research' || kind === 'gemini-canvas') && !duplicateOf;
+    const routed = ['personal', 'sensitive', 'superseded'].includes(kind) ? null : routeDomain(file.title, domains);
     return {
       id: file.id,
       title: file.title,
       kind,
-      domain: ['personal', 'sensitive', 'superseded'].includes(kind) ? null : routeDomain(file.title, domains),
+      domain: routed === 'unrouted' && kind === 'deep-research' ? routeByTopic(file.title, domains) : routed,
       createdTime: file.createdTime,
       modifiedTime: file.modifiedTime,
       bytes: Number(file.fileSize || 0),

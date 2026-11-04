@@ -30,7 +30,7 @@ Turns Gemini Deep Research reports, estate documents and live model catalogs int
 
 | Command | Does |
 |---|---|
-| `node corpus.mjs list` · `classify` · `export` | Drive listing → inventory (kind, domain, re-run dedupe, personal exclusion) → markdown export |
+| `node corpus.mjs list` · `classify` · `export` | Drive listing → inventory (kind, domain, re-run dedupe, personal exclusion) → markdown export. A Deep Research title that contains no `domains.json` keyword is routed by the words of a multi-word keyword it shares (two words and two thirds of the phrase, one domain clearly ahead); otherwise it stays `unrouted` |
 | `node corpus.mjs import <f.md>... --domain <id>` | brings local or repo docs in with path and commit provenance |
 | `node corpus.mjs push` | uploads changed files to R2 and triggers `/sync` |
 | `node corpus.mjs sync` · `status` | Worker: copy R2 into AI Search · indexing state per item |

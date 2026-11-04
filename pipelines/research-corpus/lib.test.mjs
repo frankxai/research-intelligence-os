@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   briefMarkdown, catalogMarkdown, classify, classifyKind, evidenceStats, chunkMarkdown, bm25Rank, corpusKey, dueDomains, frontMatter,
-  localFrontMatter, routeDomain, usageToday, usagePlan, parseWorksCited, splitCitations, extractClaims, sampleClaims, claimRecords,
+  localFrontMatter, routeDomain, routeByTopic, usageToday, usagePlan, parseWorksCited, splitCitations, extractClaims, sampleClaims, claimRecords,
   scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, drawSample, seedFromDigest, manifestHash, CLAIM_SCHEMA,
 } from './lib.mjs';
 
@@ -71,6 +71,24 @@ test('agentic-income-streams routes monetization and pack reports before generic
   assert.equal(report.domain, 'agentic-income-streams');
   const [runtime] = classify([doc('rt1', 'AI Agent Knowledge Layers Architecture', 217676)], { domains });
   assert.equal(runtime.domain, 'ai-models-platforms');
+});
+
+test('an unrouted Deep Research title is routed by the words of a keyword phrase it shares', () => {
+  const [income] = classify([doc('t1', 'Economics of Digital Products in the AI Era', 90000)], { domains });
+  assert.equal(income.kind, 'deep-research');
+  assert.equal(income.domain, 'agentic-income-streams', 'two of the three words of "digital product pricing"');
+  assert.equal(routeDomain(income.title, domains), 'unrouted', 'no keyword occurs in the title as written');
+});
+
+test('the topic fallback is conservative: one shared word, a tie or a write-up stays unrouted', () => {
+  const [one] = classify([doc('t2', 'Product Roadmap Framework', 90000)], { domains });
+  assert.equal(one.domain, 'unrouted', 'a single shared word is not a topic');
+  const rivals = [{ id: 'x', keywords: ['alpha beta'] }, { id: 'y', keywords: ['beta alpha gamma'] }];
+  assert.equal(routeByTopic('Alpha and Beta', rivals), 'unrouted', 'two domains lead equally');
+  assert.equal(routeByTopic('Alpha and Beta', [rivals[0], { id: 'x', keywords: ['alpha beta delta'] }]), 'x', 'one domain listed twice is not a tie');
+  const [canvas] = classify([doc('t3', 'Economics of Digital Products Blueprint', 9000)], { domains });
+  assert.equal(canvas.kind, 'gemini-canvas');
+  assert.equal(canvas.domain, 'unrouted', 'only Deep Research reports take the fallback');
 });
 
 test('front matter marks every report as unverified AI synthesis', () => {
