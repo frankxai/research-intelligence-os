@@ -113,17 +113,19 @@ function personalPatterns() {
 }
 
 function cmdList() {
-  const res = run('rclone', ['lsjson', RCLONE_REMOTE, '--files-only', '--max-depth', '1', '-M', '--drive-export-formats', 'md']);
+  const depth = String(flag('depth') || process.env.RESEARCH_DRIVE_DEPTH || '3');
+  const res = run('rclone', ['lsjson', RCLONE_REMOTE, '--files-only', '--max-depth', depth, '-M', '--drive-export-formats', 'md']);
   const files = JSON.parse(res.stdout).map((f) => ({
     id: f.ID,
-    title: f.Name.replace(/\.md$/, ''),
+    title: path.basename(f.Path || f.Name).replace(/\.md$/, ''),
+    drivePath: f.Path || f.Name,
     mimeType: f.MimeType === 'text/markdown' ? 'application/vnd.google-apps.document' : f.MimeType,
     createdTime: f.Metadata?.btime || f.ModTime,
     modifiedTime: f.ModTime,
     fileSize: f.Size,
   }));
   writeAtomic(P.listing, JSON.stringify(files, null, 2));
-  console.log(`listed ${files.length} files -> ${P.listing}`);
+  console.log(`listed ${files.length} files (max-depth ${depth}) -> ${P.listing}`);
 }
 
 function cmdClassify() {

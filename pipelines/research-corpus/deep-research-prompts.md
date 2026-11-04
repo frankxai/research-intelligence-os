@@ -36,6 +36,19 @@ Structure:
 
 ## Domain blocks
 
+### agentic-income-streams (window 14 days)
+
+```text
+Topic: empirical agentic income streams, developer digital packs, and AI affiliate/commerce economics as of {{DATE}}.
+Cover:
+1. Verified solo/small-studio AI digital products (Claude Code / Codex / Cursor skill packs, MCP server bundles, boilerplate kits, eval harnesses, Obsidian/Markdown operating systems) with publicly verifiable revenue, sales counts, GitHub Sponsor tiers, Polar.sh, Whop, Gumroad, or Stripe receipts — strictly separate verified primary numbers from self-reported claims.
+2. Merchant-of-record and agent-commerce rails (Polar.sh, Stripe Managed Payments, Whop, Paddle, GitHub Marketplace, Anthropic/OpenAI/MCP registries): fee changes, EU VAT handling, license-key/file/repo delivery mechanics, refund benchmarks, and conversion rates by price band ($0 lead magnet vs $19-$49 utility pack vs $67-$149 operating system vs $19-$49/mo continuity).
+3. AI & developer tool affiliate program changes in the last 90 days: verified commission rates, recurring windows, cookie durations, program closures or CPA cuts (PartnerStack, Impact, Dub Partners, Rewardful, FirstPromoter, direct programs), plus categories where top tools have zero cash affiliate program and must monetize via first-party packs.
+4. Regulatory & platform enforcement affecting AI income/comparison sites: FTC 16 CFR Part 255 & Part 465 enforcement actions, EU AI Act Article 50 transparency duties, Google Search spam/site-reputation-abuse updates, and AI answer-engine citation shifts.
+5. Documented failure modes: why "make money with AI agents" products fail buyer trust or see high refund rates, and what tangible proof (open-source core, live benchmark receipts, Promptfoo eval lift, public $0-to-first-dollar telemetry) converts skeptical technical buyers.
+Decision this informs: how we price, prove, package, and distribute first-party kits and verified comparison routes on agenticincome.ai, frankx.ai, and gencreator.io without hype or unverified income claims.
+```
+
 ### ai-models-platforms (window 7 days)
 
 ```text

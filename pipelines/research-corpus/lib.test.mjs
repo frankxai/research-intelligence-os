@@ -57,6 +57,14 @@ test('routeDomain returns unrouted when nothing matches', () => {
   assert.equal(routeDomain('Allow', domains), 'unrouted');
 });
 
+test('agentic-income-streams routes monetization and pack reports before generic agent keyword', () => {
+  const [report] = classify([doc('inc1', 'Agentic Income Streams and Polar.sh Pack Economics', 142000)], { domains });
+  assert.equal(report.kind, 'deep-research');
+  assert.equal(report.domain, 'agentic-income-streams');
+  const [runtime] = classify([doc('rt1', 'AI Agent Knowledge Layers Architecture', 217676)], { domains });
+  assert.equal(runtime.domain, 'ai-models-platforms');
+});
+
 test('front matter marks every report as unverified AI synthesis', () => {
   const [e] = classify([doc('f', 'Cloudflare and Vercel Architecture Hub', 364108)], { domains });
   const fm = frontMatter(e, '2026-11-01T00:00:00Z');
