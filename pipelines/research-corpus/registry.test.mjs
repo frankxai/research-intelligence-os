@@ -6,9 +6,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { drawSample } from './lib.mjs';
-import {
-  ROLES, buildRegistry, ledgerRuns, makeRedactor, matchRun, phraseHash, readers, roleRelevance, runBuild, toCsv,
-} from './registry.mjs';
+// A namespace import, so a helper missing from an older registry.mjs fails only the tests that use it.
+import * as registry from './registry.mjs';
+
+const {
+  ROLES, buildRegistry, ledgerRuns, makeRedactor, matchRun, parseJsonl, phraseHash, phraseOf, readers, redactEntry,
+  roleRelevance, runBuild, toCsv,
+} = registry;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const domains = JSON.parse(readFileSync(path.join(HERE, 'domains.json'), 'utf8')).domains;
@@ -68,7 +72,8 @@ function makeHome({ reports = {}, ledger = null, verify = {}, denylist = [PLACEH
   for (const [name, text] of Object.entries(verify)) writeFileSync(path.join(home, 'verify', name), text);
   if (denylist) {
     mkdirSync(path.join(home, 'registry'), { recursive: true });
-    writeFileSync(path.join(home, 'registry', 'redact.sha256.txt'), `# test list\n${denylist.map((p) => `${phraseHash(p)}  # test`).join('\n')}\n`);
+    const line = (p) => `${phraseHash(p)} ${phraseOf(p).split(' ').length}  # test`;
+    writeFileSync(path.join(home, 'registry', 'redact.sha256.txt'), `# test list\n${denylist.map(line).join('\n')}\n`);
   }
   if (exclude.length) writeFileSync(path.join(home, 'exclude.txt'), `${exclude.join('\n')}\n`);
   return home;
@@ -191,7 +196,7 @@ test('a listed name is redacted from every output, keys keep a slug shape, and t
 
 test('the redactor normalizes case and separators and reports what matched', () => {
   assert.equal(phraseHash('TESTPERSON-placeholder'), phraseHash(PLACEHOLDER.toLowerCase()));
-  const redact = makeRedactor({ hashes: [phraseHash(PLACEHOLDER)], phrases: ['secret_client'] });
+  const redact = makeRedactor({ entries: [redactEntry(PLACEHOLDER)], phrases: ['secret_client'] });
   const a = redact(`Notes on ${PLACEHOLDER}'s plan`);
   assert.equal(a.text, "Notes on [redacted]'s plan");
   assert.deepEqual([...a.hits], ['denylist']);
@@ -248,4 +253,111 @@ test('role relevance is 0-3, follows domain and keywords, and readers follow the
 test('CSV cells are quoted and a leading formula character is neutralized', () => {
   const csv = toCsv([{ a: '=SUM(1)', b: 'x, "y"', c: ['one', 'two'], d: null, e: 3 }], ['a', 'b', 'c', 'd', 'e']);
   assert.equal(csv, `a,b,c,d,e\n'=SUM(1),"x, ""y""",one; two,,3\n`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Regressions from the cross-family review of ee6d84f, one per finding.
+const OUTPUTS = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'];
+const allOutputs = (home) => OUTPUTS.map((n) => readFileSync(path.join(home, 'registry', n), 'utf8')).join('\n');
+
+test('review 1: a redaction phrase of any length is redacted, and a list line without a word count stops the build', () => {
+  const long = 'Alpha Bravo Charlie Delta Echo';
+  const key = 'marketing/2026-11-01-alpha-bravo-charlie-delta-echo-notes.md';
+  const home = makeHome({ reports: { [key]: report({ title: `${long} notes`, domain: 'marketing' }) }, denylist: [long] });
+  try {
+    runBuild({ home, now: NOW });
+    assert.doesNotMatch(allOutputs(home), /charlie/i, 'a five-word phrase leaks if only short phrases are searched');
+    assert.equal(readRows(home)[0].privacy, 'redacted');
+    writeFileSync(path.join(home, 'registry', 'redact.sha256.txt'), `${phraseHash(long)}  # count missing\n`);
+    rmSync(path.join(home, 'registry', 'REGISTRY.md'));
+    assert.throws(() => runBuild({ home, now: NOW }), /word count/);
+    assert.equal(existsSync(path.join(home, 'registry', 'REGISTRY.md')), false, 'nothing is written when the list is refused');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+  const cli = spawnSync(process.execPath, [path.join(HERE, 'registry.mjs'), 'redact-hash', long, '--label', 'test'], { encoding: 'utf8' });
+  assert.equal(cli.stdout.trim(), `${phraseHash(long)} 5  # test`);
+});
+
+test('review 2: composed, decomposed, full-width and case-folded forms of a listed phrase are all redacted', () => {
+  const composed = 'Téstperson Placeholder';
+  const key = 'marketing/2026-11-01-téstperson-placeholder-brief.md';
+  const home = makeHome({ reports: { [key]: report({ title: 'Téstperson Placeholder brief', domain: 'marketing' }) }, denylist: [composed] });
+  try {
+    runBuild({ home, now: NOW });
+    assert.doesNotMatch(allOutputs(home).normalize('NFKD').replace(/\p{M}/gu, ''), /testperson|placeholder/i);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+  assert.equal(phraseHash('Téstperson Placeholder'), phraseHash(composed));
+  assert.equal(phraseHash('STRASSE'), phraseHash('straße'), 'full case folding');
+  const redact = makeRedactor({ entries: [redactEntry(composed)] });
+  const variants = ['Téstperson Placeholder', 'Téstperson Placeholder', 'Ｔｅ́ｓｔperson PLACEHOLDER', 'TÉSTPERSON-placeholder'];
+  for (const variant of variants) {
+    assert.equal(redact(`Notes on ${variant} today`).text, 'Notes on [redacted] today', JSON.stringify(variant));
+  }
+});
+
+test('review 3: CSV cells that open with a formula character after whitespace or controls, or in full width, are neutralized', () => {
+  const risky = ['\n=1+1', '＝1+1', '  @cmd', '\t1', '－1', '\r\n+1', '＋1', '＠x', '\u0007=1'];
+  for (const value of risky) {
+    const cellText = toCsv([{ a: value }], ['a']).slice('a\n'.length);
+    assert.match(cellText, /^"?'/, JSON.stringify(value));
+  }
+  assert.equal(toCsv([{ a: 'plain', b: 'a-b' }], ['a', 'b']), 'a,b\nplain,a-b\n');
+});
+
+test('review 4: a whitespace-only line in a claims file blocks the registry exactly as it fails verify score', () => {
+  const { records, manifest } = checkedSample([]);
+  const lines = records.map((r) => JSON.stringify(r));
+  const verify = (home) => spawnSync(process.execPath, [path.join(HERE, 'corpus.mjs'), 'verify', 'score', KEY], { env: { ...process.env, RESEARCH_HOME: home }, encoding: 'utf8' });
+  const cases = [[`${lines.join('\n')}\n`, 'pass', true], [`${lines[0]}\n   \n${lines.slice(1).join('\n')}\n`, 'blocked', false]];
+  for (const [claims, release, exitOk] of cases) {
+    const home = makeHome({ reports: { [KEY]: STUDY }, verify: { [`${STEM}.claims.jsonl`]: claims, [`${STEM}.manifest.json`]: JSON.stringify(manifest) } });
+    try {
+      runBuild({ home, now: NOW });
+      assert.equal(readRows(home)[0].release, release);
+      assert.equal(verify(home).status === 0, exitOk, 'verify score agrees with the registry');
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }
+  assert.throws(() => parseJsonl(`${lines[0]}\n   \n${lines[1]}\n`), SyntaxError);
+});
+
+test('review 5: guidance for a passing report covers only the supported sampled claims', () => {
+  const [human, agent] = readers({ release: 'pass' });
+  for (const text of [human, agent]) {
+    assert.doesNotMatch(text, /numbers hold|report is (true|verified)/i);
+    assert.match(text, /unverified/);
+  }
+  assert.match(human, /sampled claims/);
+  assert.match(agent, /claim records/);
+});
+
+test('review 6: coverage counts claims in every extraction mode, so a table-only sample cannot reach rank 100', () => {
+  const names = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet'];
+  const prose = ['kilo', 'lima', 'mike', 'november', 'oscar'];
+  const body = [
+    '# Study', '', '| Claim | Source URL | Date |', '|---|---|---|',
+    ...names.map((n) => `| Tool ${n} offers a free plan | https://${n}.example.com/plans | 2026-10 |`), '',
+    ...prose.flatMap((n, i) => [`Vendor ${n} raised its list price this year per its blog${i + 1}.`, '']),
+    '## Works cited', '', ...prose.map((n, i) => `${i + 1}. Vendor ${n} blog, https://${n}.example.org/post`), '',
+  ].join('\n');
+  const text = report({ title: TITLE, domain: 'agentic-income-streams', body });
+  const { records, manifest } = drawSample(text, { reportKey: KEY, n: 10, sampledAt: '2026-11-04T18:00:00.000Z' });
+  const filled = records.map((r) => ({ ...r, status: 'verified', excerpt: 'quoted', checker: 'independent-test-checker', checked_at: '2026-11-04T19:00:00.000Z' }));
+  const home = makeHome({ reports: { [KEY]: text }, verify: { [`${STEM}.claims.jsonl`]: jsonl(filled), [`${STEM}.manifest.json`]: JSON.stringify(manifest) } });
+  try {
+    runBuild({ home, now: NOW });
+    const [r] = readRows(home);
+    assert.equal(r.release, 'pass', JSON.stringify(r.release_blocks));
+    assert.equal(r.claims_in_report, 15);
+    assert.equal(r.score_verification_coverage, 10);
+    assert.equal(r.rank_score, 95);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review 7: a report saved with lone CR line endings keeps its source, Drive id and privacy flag', () => {
+  const text = report({ title: TITLE, domain: 'agentic-income-streams', id: 'quarantined-doc' }).replace(/\n/g, '\r');
+  const { rows } = buildRegistry({ reports: [{ key: KEY, text }], domains, exclusionIds: new Set(['quarantined-doc']), now: NOW });
+  const [r] = rows;
+  assert.equal(r.source, 'google-drive');
+  assert.equal(r.drive_doc_id, 'quarantined-doc');
+  assert.equal(r.privacy, 'excluded-id');
+  assert.equal(r.title, TITLE);
 });

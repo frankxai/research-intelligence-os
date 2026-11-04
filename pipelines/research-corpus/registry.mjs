@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync,
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { evidenceStats, extractClaims, scoreClaims, usagePlan } from './lib.mjs';
+import { evidenceStats, extractClaims, normalizeEol, scoreClaims, usagePlan } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DAY_MS = 86_400_000;
@@ -103,16 +103,52 @@ export const ROLE_COLUMNS = ['row_id', 'key', 'title', 'domain', 'kind', 'eviden
 // Privacy. Every string written is passed through the redactor, and every output is scanned again before
 // anything is written. Names are listed as SHA-256 hashes of the normalized phrase, so the list itself names no
 // one; hashes of short names are guessable, so the list stays private. exclude.txt patterns redact too.
-const WORD_RE = /[\p{L}\p{N}]+/gu;
-const MAX_PHRASE_WORDS = 3;
-const fold = (s) => s.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
+//
+// One tokenizer serves hashing, redaction and the final scan, so a phrase is matched however it is encoded:
+// a raw word is a run of letters, digits and combining marks in the original text, folded by compatibility
+// decomposition (NFKD: full-width and ligature forms become plain letters), full case folding (upper then
+// lower, so "ß" and "SS" agree) and removal of combining marks (composed and decomposed accents agree).
+// A raw word can fold into several tokens ("½" -> "1 2"); they share its span.
+const RAW_WORD_RE = /[\p{L}\p{N}\p{M}]+/gu;
+const FOLDED_WORD_RE = /[\p{L}\p{N}]+/gu;
+const fold = (s) => s.normalize('NFKD').toUpperCase().toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '');
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
+function tokens(text) {
+  const out = [];
+  for (const m of String(text ?? '').matchAll(RAW_WORD_RE)) {
+    for (const w of fold(m[0]).match(FOLDED_WORD_RE) ?? []) out.push({ start: m.index, end: m.index + m[0].length, w });
+  }
+  return out;
+}
+
 export function phraseOf(text) {
-  return (fold(String(text ?? '')).match(WORD_RE) ?? []).join(' ');
+  return tokens(text).map((t) => t.w).join(' ');
 }
 
 export const phraseHash = (phrase) => sha256(phraseOf(phrase));
+
+// A denylist entry records its word count, so the redactor searches exactly the phrase lengths it needs:
+// any length is supported, and an entry whose length is unknown is refused instead of silently skipped.
+export function redactEntry(phrase) {
+  const words = tokens(phrase).length;
+  if (!words) throw new Error('a redaction phrase needs at least one letter or digit');
+  return { hash: phraseHash(phrase), words };
+}
+
+const ENTRY_RE = /^([0-9a-f]{64})\s+(\d+)(?:\s+#.*)?$/;
+
+// `<sha256> <word count>  # label` per line; blank lines and # comments are skipped. Any other line stops the
+// build: a malformed or count-less entry would otherwise leave its phrase unredacted without a sign.
+export function parseRedactList(text) {
+  return normalizeEol(text).split('\n').map((l, i) => [l.trim(), i + 1]).filter(([l]) => l && !l.startsWith('#')).map(([l, n]) => {
+    const m = l.match(ENTRY_RE);
+    if (!m || Number(m[2]) < 1) {
+      throw new Error(`redaction list line ${n} is not "<sha256> <word count>  # label": regenerate it with "node registry.mjs redact-hash"`);
+    }
+    return { hash: m[1], words: Number(m[2]) };
+  });
+}
 
 function mergeSpans(spans) {
   const out = [];
@@ -125,17 +161,20 @@ function mergeSpans(spans) {
 }
 
 // redact(text, mask) -> { text, hits }: hits holds 'denylist' and/or 'exclusion' for what matched.
-export function makeRedactor({ hashes = [], phrases = [] } = {}) {
-  const hashSet = new Set(hashes);
+// entries: [{ hash, words }] from parseRedactList or redactEntry; phrases: plain exclusion patterns.
+export function makeRedactor({ entries = [], phrases = [] } = {}) {
+  const hashSet = new Set(entries.map((e) => e.hash));
   const phraseSet = new Set(phrases.map(phraseOf).filter(Boolean));
+  const lengths = [...new Set([...entries.map((e) => e.words), ...[...phraseSet].map((p) => p.split(' ').length)])].sort((a, b) => a - b);
   const kindOf = (p) => (phraseSet.has(p) ? 'exclusion' : hashSet.has(sha256(p)) ? 'denylist' : null);
   return (value, mask = '[redacted]') => {
     const text = String(value);
-    const words = [...text.matchAll(WORD_RE)].map((m) => ({ start: m.index, end: m.index + m[0].length, w: fold(m[0]) }));
+    const words = tokens(text);
     const spans = [];
     const hits = new Set();
     for (let i = 0; i < words.length; i += 1) {
-      for (let n = 1; n <= MAX_PHRASE_WORDS && i + n <= words.length; n += 1) {
+      for (const n of lengths) {
+        if (i + n > words.length) break;
         const kind = kindOf(words.slice(i, i + n).map((x) => x.w).join(' '));
         if (kind) { hits.add(kind); spans.push([words[i].start, words[i + n - 1].end]); }
       }
@@ -222,8 +261,10 @@ export function matchRun(report, runs) {
   return hits.sort((a, b) => Math.abs(created - endOf(a)) - Math.abs(created - endOf(b)))[0] ?? null;
 }
 
+// Line endings are normalized first, as the verifier does, so a file saved with CRLF or lone CR keeps its
+// source, Drive id and privacy flag.
 function reportFacts(key, text, exclusionIds) {
-  const { meta, body } = parseFrontMatter(text);
+  const { meta, body } = parseFrontMatter(normalizeEol(text));
   const fromFm = meta.evidence !== undefined && meta.source_urls !== undefined && meta.source_hosts !== undefined;
   const computed = fromFm ? null : evidenceStats(body);
   const driveId = meta.source === 'google-drive' ? meta.source_id ?? null : null;
@@ -270,11 +311,11 @@ function claimColumns(set, facts, text) {
   } catch (e) {
     return { ...CLAIM_NULLS, release: 'blocked', release_blocks: [`scoring failed: ${e.message}`], claims_backup: set.backup };
   }
-  const mode = set.manifest?.mode ?? set.records[0]?.sample_from ?? 'auto';
   const stamps = set.records.map((r) => r.checked_at).filter((t) => !Number.isNaN(Date.parse(t))).sort();
   const s = score.byStatus;
   return {
-    claims_in_report: extractClaims(text, { from: mode }).length, claims_sampled: score.total, claims_checked: score.checked,
+    // Every claim the report makes in any extraction mode, so sampling a narrow mode cannot inflate coverage.
+    claims_in_report: extractClaims(text, { from: 'all' }).length, claims_sampled: score.total, claims_checked: score.checked,
     claims_verified: s.verified, claims_partial: s.partial, claims_contradicted: s.contradicted, claims_unsupported: s.unsupported,
     claims_garbled: s.garbled, claims_unreachable: s.unreachable, claims_pending: s.pending,
     verified_rate: score.verifiedRate, supported_rate: score.supportedRate, release: score.release, release_blocks: score.blocks,
@@ -325,9 +366,10 @@ export function roleRelevance(domain, { title, headings }, roleDomains = {}) {
   }));
 }
 
-// How a person and an agent should consume a report, by what has been checked, not by topic.
+// How a person and an agent should consume a report, by what has been checked, not by topic. A pass covers
+// only the sampled claims a checker supported; it says nothing about the rest of the report.
 export function readers(row) {
-  if (row.release === 'pass') return ['Read as a checked brief; its numbers hold as of the verification date.', 'Load verified and partial claim records with source and date; cite record ids.'];
+  if (row.release === 'pass') return ['Trust only the sampled claims marked verified or partial, as of their check date; the rest is unverified AI synthesis.', 'Use only verified and partial claim records, each with its source and date; treat everything else in the report as unverified.'];
   if (row.release === 'blocked') return ['Read the blocked and contradicted claims first; use it for direction, not numbers.', 'Use only verified claim records; never repeat contradicted or unchecked claims.'];
   if (row.source === 'local-file') return ['Estate document as of its recorded commit; check for a newer version.', 'Cite with path and commit; re-read the source when it may have changed.'];
   if (row.evidence === 'cited') return ['Skim as unverified AI synthesis; check any number before acting on it.', 'Retrieve for orientation only; label every statement unverified-ai-synthesis.'];
@@ -416,12 +458,15 @@ function findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles
 
 // ---------------------------------------------------------------------------------------------
 // Rendering.
+// A spreadsheet must never run a cell as a formula: a cell that opens with tab, CR or LF, or whose first character
+// after any leading whitespace or control characters is = + - @ or a full-width form of one, gets a leading quote.
+const FORMULA_LEAD = /^(?:[\t\r\n]|[\s\p{Cc}\p{Cf}]*[=+\-@＝＋－＠])/u;
+
 function csvCell(v) {
   if (v === null || v === undefined) return '';
   if (typeof v === 'number') return String(v);
   let s = Array.isArray(v) ? v.join('; ') : String(v);
-  // A spreadsheet must never run a cell as a formula.
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  if (FORMULA_LEAD.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -451,10 +496,10 @@ function weightLines(econ, localKeys) {
     .map(([d, w]) => `${d} ${w}${localKeys.has(d) ? ' (local)' : ''}`).join(' · ');
   return [
     ...mdTable(['Component', 'Max', 'Rule'], [
-      ['Evidence integrity', WEIGHTS.evidenceIntegrity, `verified ÷ checked × min(1, checked ÷ min(${SAMPLE_FOR_FULL_CREDIT}, claims in report)); blank when unsampled`],
+      ['Evidence integrity', WEIGHTS.evidenceIntegrity, `verified ÷ checked × min(1, checked ÷ min(${SAMPLE_FOR_FULL_CREDIT}, claims in report)); blank when unsampled. Claims in report = every claim in any extraction mode (table and cited prose)`],
       ['Source breadth', WEIGHTS.sourceBreadth, `min(1, distinct cited hosts ÷ ${HOSTS_FOR_FULL_CREDIT})`],
       ['Freshness', WEIGHTS.freshness, `full inside the domain's refresh window (staleDays, default ${DEFAULT_STALE_DAYS}), then linear to 0 over ${FRESHNESS_DECAY_WINDOWS} more windows`],
-      ['Verification coverage', WEIGHTS.verificationCoverage, 'min(1, checked claims ÷ claims in report); blank when unsampled'],
+      ['Verification coverage', WEIGHTS.verificationCoverage, 'min(1, checked claims ÷ claims in report across all extraction modes); blank when unsampled'],
       ['Economic relevance', WEIGHTS.economicRelevance, 'domain weight × max; set only by the table below, never by keywords'],
     ]),
     '', `Economic domain weights: ${domainList}. Unlisted domains weigh 0.`,
@@ -511,10 +556,16 @@ function readJson(file, fallback) {
   return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : fallback;
 }
 
+// Exactly how corpus.mjs reads a claims file or the usage ledger (its readJsonl and readUsage): split on LF or
+// CRLF, drop only empty lines, parse every other line. A whitespace-only line fails there, so it fails here, and
+// the registry's release verdict stays the one `verify score` gives. corpus.mjs runs its CLI on import, so
+// the loader is replicated here rather than imported; keep the two identical.
+export function parseJsonl(text) {
+  return String(text).split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+}
+
 function readJsonl(file) {
-  return readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim()).map((l, i) => {
-    try { return JSON.parse(l); } catch (e) { throw new Error(`${path.basename(file)} line ${i + 1}: ${e.message}`); }
-  });
+  try { return parseJsonl(readFileSync(file, 'utf8')); } catch (e) { throw new Error(`${path.basename(file)}: ${e.message}`); }
 }
 
 function listMarkdown(dir) {
@@ -568,7 +619,7 @@ export function loadHome(home) {
     local: readJson(path.join(home, 'registry', 'weights.local.json'), {}),
     exclusionIds: new Set(readLines(path.join(home, 'exclude-ids.txt'))),
     exclusionPhrases: readLines(path.join(home, 'exclude.txt')),
-    denylist: existsSync(redactFile) ? readLines(redactFile).map((l) => l.split(/\s+/)[0]).filter((h) => /^[0-9a-f]{64}$/.test(h)) : null,
+    denylist: existsSync(redactFile) ? parseRedactList(readFileSync(redactFile, 'utf8')) : null,
     redactFile,
   };
 }
@@ -585,7 +636,7 @@ export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
   if (!input.denylist && !allowUnredacted) {
     throw new Error(`no redaction list at ${input.redactFile}: outputs could name people. Add hashes with "node registry.mjs redact-hash", or pass --allow-unredacted`);
   }
-  const redact = makeRedactor({ hashes: input.denylist ?? [], phrases: input.exclusionPhrases });
+  const redact = makeRedactor({ entries: input.denylist ?? [], phrases: input.exclusionPhrases });
   const reg = buildRegistry({ ...input, redact, now });
   const redaction = input.denylist
     ? `Share-check: every output was scanned against ${input.denylist.length} hashed name phrase(s) and ${input.exclusionPhrases.length} private exclusion pattern(s) before writing; a hit stops the build and writes nothing. Matches are shown as [redacted].`
@@ -620,7 +671,8 @@ function main() {
   if (cmd === 'redact-hash') {
     const phrase = process.argv[3];
     if (!phrase || phrase.startsWith('--')) throw new Error('usage: redact-hash "<phrase>" [--label <label>]');
-    console.log(`${phraseHash(phrase)}  # ${flag('label') ?? 'added'}`);
+    const { hash, words } = redactEntry(phrase);
+    console.log(`${hash} ${words}  # ${flag('label') ?? 'added'}`);
     return;
   }
   throw new Error('usage: node registry.mjs build [--allow-unredacted] | redact-hash "<phrase>" [--label <label>]');
