@@ -12,7 +12,8 @@ import * as registry from './registry.mjs';
 
 const {
   PUBLIC_DOMAIN_IDS, ROLES, buildRegistry, ledgerRuns, makeRedactor, matchRun, parseJsonl, parseRedactList, phraseHash, phraseOf,
-  pipelineExcludes, protectCounts, readers, redactEntry, roleRelevance, runBuild, shareVocabulary, shareableScan, toCsv,
+  pipelineExcludes, readers, redactEntry, roleRelevance, runBuild, shareVocabulary, shareableScan, toCsv, coarseCount, verifiedRateBand,
+  sampledShareBand,
 } = registry;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -87,20 +88,14 @@ function makeHome({ reports = {}, ledger = null, verify = {}, denylist = [PLACEH
 
 const jsonl = (records) => `${records.map((r) => JSON.stringify(r)).join('\n')}\n`;
 const STEM = 'agentic-income-streams__2026-11-04-creator-pricing-economics-study';
-const FILES = { private: ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'], shareable: ['REGISTRY.md', 'aggregates.csv', 'roles.csv'] };
+const FILES = { private: ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'], shareable: ['REGISTRY.md'] };
 const read = (home, tier, name) => readFileSync(path.join(home, 'registry', tier, name), 'utf8');
 const readRows = (home) => read(home, 'private', 'reports.jsonl').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const tierText = (home, tier) => FILES[tier].map((n) => read(home, tier, n)).join('\n');
 const allOutputs = (home) => `${tierText(home, 'private')}\n${tierText(home, 'shareable')}`;
-// shareable/aggregates.csv as { dimension: { bucket: shown } }.
-function aggregates(home) {
-  const out = {};
-  for (const line of read(home, 'shareable', 'aggregates.csv').trim().split('\n').slice(1)) {
-    const [dimension, bucket, shown] = line.split(',');
-    (out[dimension] ??= {})[bucket] = shown;
-  }
-  return out;
-}
+const shared = (home) => read(home, 'shareable', 'REGISTRY.md');
+// A table row of the shareable snapshot, e.g. cellOf(md, '50-69%') -> 'some'.
+const cellOf = (md, bucket) => md.match(new RegExp(`^\\| ${bucket.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\| ([^|]+) \\|$`, 'm'))?.[1].trim();
 const HEX12 = /\b[0-9a-f]{12}\b/;
 
 function filesUnder(dir) {
@@ -128,7 +123,7 @@ test('a row carries front matter, ledger timing, measured cost and Drive provena
 });
 
 test('an unsampled report is unranked and has no claim-derived scores', () => {
-  const { rows, aggregates: agg } = buildRegistry({ reports: [{ key: KEY, text: STUDY }], domains, now: NOW });
+  const { rows, snapshot } = buildRegistry({ reports: [{ key: KEY, text: STUDY }], domains, now: NOW });
   const [r] = rows;
   assert.equal(r.release, 'unsampled');
   assert.equal(r.rank_score, 'unranked');
@@ -137,7 +132,7 @@ test('an unsampled report is unranked and has no claim-derived scores', () => {
   assert.equal(r.score_verification_coverage, null);
   assert.deepEqual([r.score_source_breadth, r.score_freshness, r.score_economic_relevance], [15, 15, 15]);
   assert.match(toCsv(rows, ['key', 'rank_score', 'score_evidence_integrity']), /,unranked,\n$/);
-  assert.deepEqual(agg.dims.find((d) => d.id === 'score').cells.find(([b]) => b === 'A'), ['A', '0']);
+  assert.deepEqual(snapshot.presence.find((d) => d.id === 'score').cells.find(([b]) => b === 'A'), ['A', 'none']);
 });
 
 test('a contradicted claim blocks release but the report is still ranked for review', () => {
@@ -153,7 +148,7 @@ test('a contradicted claim blocks release but the report is still ranked for rev
     assert.equal(r.checker, 'independent-test-checker');
     assert.equal(typeof r.rank_score, 'number');
     assert.equal(r.score_evidence_integrity, 26.7);
-    assert.notEqual(aggregates(home).release.blocked, '0', 'the shareable tier counts it, masked');
+    assert.match(shared(home), /^- Blocked: some\.$/m, 'the shareable tier says only that something is blocked');
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -238,7 +233,7 @@ test('a title matching a private exclusion pattern once separators are normalize
     assert.doesNotMatch(allOutputs(home), /testperson|2026-11-01-notes/i);
     assert.match(read(home, 'private', 'REGISTRY.md'), /1 excluded, withheld/);
     const shared = read(home, 'shareable', 'REGISTRY.md');
-    assert.match(shared, /if any, are withheld from every count/);
+    assert.match(shared, /if any, are withheld from every figure in this file/);
     assert.doesNotMatch(shared, /excluded, withheld|a few/, 'the shareable tier never states how many');
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
@@ -415,7 +410,7 @@ test('review 6.1: the shareable tier carries no character, word, key, id or Driv
     assert.match(read(home, 'private', 'REGISTRY.md'), /PRIVATE: do not share/i);
   } finally { rmSync(home, { recursive: true, force: true }); }
   const vocabulary = shareVocabulary();
-  assert.deepEqual(shareableScan('| marketing | <5 | hidden | 2026 |', vocabulary), { nonAscii: 0, unknownWords: 0, ok: true });
+  assert.deepEqual(shareableScan('| marketing | <10 | some | none | 2026 |', vocabulary), { nonAscii: 0, unknownWords: 0, ok: true });
   assert.equal(shareableScan('| 3d12d62c8411 | Confidential dossier |', vocabulary).unknownWords, 3, 'an id and free text are refused');
   assert.equal(shareableScan('café', vocabulary).nonAscii, 1);
 });
@@ -436,7 +431,6 @@ test('review 6.2: documents excluded by Drive id, quarantine or exclusion patter
   try {
     runBuild({ home, now: NOW });
     assert.deepEqual(readRows(home).map((r) => r.key), [KEY], 'the private tier has only the kept report');
-    assert.equal(aggregates(home).domain.marketing, '0', 'no withheld report is counted in the shareable tier');
     for (const tier of ['private', 'shareable']) {
       const text = tierText(home, tier);
       assert.doesNotMatch(text, /alpha|bravo|charlie|secretclient|drive-id/i, tier);
@@ -492,7 +486,6 @@ test('review 7.1: private configuration cannot put a domain id or weight key int
   try {
     runBuild({ home, now: NOW });
     assert.doesNotMatch(tierText(home, 'shareable'), /drive\.google|secretdomain1|open\?id|unusedsecretweightkey/i);
-    assert.notEqual(aggregates(home).domain.other, '0', 'the private domain is counted under other');
     assert.match(read(home, 'private', 'REGISTRY.md'), /unusedsecretweightkey 0\.9/, 'the private tier still lists private weights');
     writeUnder(home, 'registry/weights.local.json', JSON.stringify({ economicDomainWeights: { marketing: 'agent strategy report' } }));
     assert.throws(() => runBuild({ home, now: NOW }), /must be a number from 0 to 1/, 'a weight cannot carry text');
@@ -579,7 +572,7 @@ test('verified-rate gate: a sample of six verified and four partial claims is bl
       const [r] = readRows(home);
       assert.equal(r.release, release, JSON.stringify(r.release_blocks));
       if (release === 'blocked') assert.ok(r.release_blocks.some((b) => /verified rate 60% is below the 70% minimum/.test(b)));
-      assert.notEqual(aggregates(home).release[release], '0', 'the shareable tier counts the verdict, masked');
+      assert.match(shared(home), release === 'pass' ? /^- Passes: some\.$/m : /^- Blocked: some\.$/m, 'the shareable tier gives the verdict as some or none');
     } finally { rmSync(home, { recursive: true, force: true }); }
   }
   for (const text of readers({ release: 'pass' })) assert.doesNotMatch(text, /verified (or|and) partial/i);
@@ -623,18 +616,21 @@ test('a run closed with an excluded document\'s Drive id is withheld with it, ev
 // ---------------------------------------------------------------------------------------------
 // Regressions from the cross-family review of 0603d1a: the shareable tier becomes aggregate-only.
 
-// A ledger with one run per entry in `runs` ([title, domain, startIso, endIso, windowCost, weeklyCost]), each measured on
-// its own between two readings, followed by `tail` (by default LEDGER, itself one measured run).
+// A ledger with one run per entry in `runs` ([title, domain, startIso, endIso, windowCost, weeklyCost, docId?]), each
+// measured on its own between two readings, followed by `tail` (by default LEDGER, itself one measured run). A docId
+// closes the run as `usage done --doc-id` would.
 function measuredLedger(runs, tail = LEDGER) {
   let session = 0;
   let weekly = 10;
-  return [...runs.flatMap(([title, domain, start, end, w, k]) => {
+  return [...runs.flatMap(([title, domain, start, end, w, k, docId]) => {
     const before = reading(new Date(Date.parse(start) - 60_000).toISOString(), session, weekly);
     session += w;
     weekly += k;
-    return [before, { ts: start, type: 'run', domain, title }, { ts: end, type: 'done', title }, reading(new Date(Date.parse(end) + 60_000).toISOString(), session, weekly)];
+    const done = { ts: end, type: 'done', title, ...(docId ? { doc_id: docId } : {}) };
+    return [before, { ts: start, type: 'run', domain, title }, done, reading(new Date(Date.parse(end) + 60_000).toISOString(), session, weekly)];
   }), ...tail];
 }
+const separateRuns = (n) => [...Array(n)].map((_, i) => [`Separate run ${i} prompt words`, 'marketing', `2026-10-2${i}T10:00:00.000Z`, `2026-10-2${i}T10:30:00.000Z`, 30, 3]);
 
 test('review 8.1: a quarantined document that left corpus/ still withholds its ledger runs and costs', () => {
   const qTitle = 'Quarantined Strategy Memo Alpha';
@@ -698,30 +694,97 @@ test('review 8.4: the row-id salt is gone; private ids are the plain key hash an
   writeUnder(home, 'registry/private/.id-salt', `${'a'.repeat(64)}\n`);
   writeUnder(home, 'registry/shareable/reports.jsonl', `{"row_id":"${plainId(KEY)}"}\n`);
   writeUnder(home, 'registry/shareable/reports.csv', 'row_id\n');
+  writeUnder(home, 'registry/shareable/aggregates.csv', 'dimension,bucket,reports\n');
+  writeUnder(home, 'registry/shareable/roles.csv', 'role,domain,reports_relevance_2_plus\n');
   try {
     runBuild({ home, now: NOW });
     assert.equal(existsSync(path.join(home, 'registry', 'private', '.id-salt')), false, 'an old salt file is deleted');
-    assert.deepEqual(readdirSync(path.join(home, 'registry', 'shareable')).sort(), [...FILES.shareable].sort(), 'old per-report shareable files are deleted');
+    assert.deepEqual(readdirSync(path.join(home, 'registry', 'shareable')), ['REGISTRY.md'], 'every older shareable file is deleted');
     assert.equal(readRows(home)[0].row_id, plainId(KEY));
     assert.match(read(home, 'private', 'REGISTRY.md'), /first 12 hex digits of the SHA-256 of the corpus key/);
     assert.doesNotMatch(tierText(home, 'shareable'), HEX12);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('review 8.5: small counts are masked so subtraction cannot recover them, and cost shows only as a band over five runs', () => {
+test('review 8.5: usage cost shows only as a band over at least five measured runs', () => {
   const reports = Object.fromEntries([...Array(6)].map((_, i) => [`marketing/2026-11-0${i + 1}-study-${i}.md`, report({ title: `Market study number ${i} draft`, domain: i < 5 ? 'marketing' : 'community', id: `m-${i}` })]));
-  const runs = (n) => [...Array(n)].map((_, i) => [`Separate run ${i} prompt words`, 'marketing', `2026-10-2${i}T10:00:00.000Z`, `2026-10-2${i}T10:30:00.000Z`, 30, 3]);
   for (const [n, cost] of [[4, /Insufficient data/], [5, /window 25-49%, weekly 2-4%/]]) {
-    const home = makeHome({ reports, ledger: measuredLedger(runs(n), []), denylist: [] });
+    const home = makeHome({ reports, ledger: measuredLedger(separateRuns(n), []), denylist: [] });
     try {
       runBuild({ home, now: NOW });
-      const agg = aggregates(home);
-      assert.deepEqual([agg.domain.marketing, agg.domain.community, agg.total.all], ['hidden', 'hidden', '6']);
-      assert.match(read(home, 'shareable', 'REGISTRY.md'), cost, `${n} measured runs`);
-      assert.doesNotMatch(read(home, 'shareable', 'REGISTRY.md'), /\b30%|\b3%/, 'no exact mean is published');
+      assert.match(shared(home), cost, `${n} measured runs`);
+      assert.doesNotMatch(shared(home), /\b30%|\b3%/, 'no exact mean is published');
     } finally { rmSync(home, { recursive: true, force: true }); }
   }
-  assert.deepEqual(protectCounts([['a', 6], ['b', 1]]), [['a', 'hidden'], ['b', 'hidden']], 'two cells cannot hide a 1 from a total of 7');
-  assert.deepEqual(protectCounts([['a', 100], ['b', 3], ['c', 20], ['d', 0]]), [['a', '100'], ['b', '<5'], ['c', 'hidden'], ['d', '0']]);
-  assert.deepEqual(protectCounts([['a', 7], ['b', 9]]), [['a', '7'], ['b', '9']]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Regressions from the cross-family review of a16531c. Findings 1, 2 and 4 (small-cell suppression defeated by
+// complements, cross-file subtraction and successive snapshots) are superseded by design: one coarse file with rounded
+// one-dimension counts and some/none for anything claim-check related. Findings 3 and 5 are fixed.
+
+test('review 9.1/9.2/9.4: one coarse file, rounded counts, no cross-tabulation, and adding a report changes nothing at small sizes', () => {
+  const corpus = (n) => Object.fromEntries([...Array(n)].map((_, i) => {
+    const domain = i === 0 ? 'community' : i <= 5 ? 'marketing' : 'business-strategy';
+    return [`${domain}/2026-11-0${(i % 9) + 1}-memo-${i}.md`, report({ title: `Brand memo ${i}`, domain, id: `b-${i}` })];
+  }));
+  const build = (n) => {
+    const home = makeHome({ reports: corpus(n), denylist: [] });
+    runBuild({ home, now: NOW });
+    return home;
+  };
+  const [eleven, five, six] = [build(11), build(5), build(6)];
+  try {
+    const md = shared(eleven);
+    assert.deepEqual(['community', 'marketing', 'business-strategy'].map((d) => cellOf(md, d)), ['<10', '<10', '<10'], 'the reviewer\'s [1, 5, 5] table');
+    assert.match(md, /^Reports: 10 \(rounded/m, 'the total is rounded too');
+    assert.doesNotMatch(md, /hidden|<5|relevance >=|product-strategist|growth-and-distribution|brand-and-voice/i, 'no masking scheme and no role cross-tab');
+    assert.deepEqual(readdirSync(path.join(eleven, 'registry', 'shareable')), ['REGISTRY.md'], 'a single shareable file');
+    assert.match(md, /no more often than monthly/);
+    assert.match(md, /^- Passes: none\.$/m);
+    assert.equal(shared(five), shared(six), 'a snapshot of five reports and one of six are identical: the added report is not visible');
+  } finally { for (const h of [eleven, five, six]) rmSync(h, { recursive: true, force: true }); }
+  assert.deepEqual([0, 1, 9, 10, 14, 15, 114].map(coarseCount), ['<10', '<10', '<10', '10', '10', '20', '110']);
+});
+
+test('review 9.3: a run or close record carrying an excluded Drive id is dropped even when no copy of that document exists', () => {
+  const runs = [...separateRuns(4), ['Unrelated prompt for a removed document', 'web3-general', '2026-10-28T10:00:00.000Z', '2026-10-28T10:30:00.000Z', 30, 3, 'gone-doc-id-0001']];
+  const ledger = [...measuredLedger(runs, []), { ts: '2026-10-29T08:00:00.000Z', type: 'abandoned', title: 'Typo title nobody started', doc_id: 'gone-doc-id-0001' }];
+  const home = makeHome({ reports: { [KEY]: STUDY }, ledger, excludeIds: ['gone-doc-id-0001'] });
+  try {
+    runBuild({ home, now: NOW });
+    const priv = read(home, 'private', 'REGISTRY.md');
+    assert.match(priv, /Measured runs: 4\./, 'four eligible runs stay four');
+    assert.doesNotMatch(priv, /removed document|2026-10-28T10|name a title that matches no run/i, 'neither the run nor its close record is reported');
+    assert.match(shared(home), /Insufficient data: fewer than 5 measured runs/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review 9.5: verified-rate and sampled-share bands come from whole counts in both tiers', () => {
+  const table = (n) => ['# Large study', '', '| Claim | Source URL | Date |', '|---|---|---|',
+    ...Array.from({ length: n }, (_, i) => `| Tool number ${i} offers plan option ${i} today | https://t${i}.example.com/p | 2026-10 |`), ''].join('\n');
+  const keyA = 'marketing/2026-11-04-verified-boundary-study.md';
+  const keyB = 'marketing/2026-11-04-sampled-boundary-study.md';
+  const records = (key, n, status) => jsonl(Array.from({ length: n }, (_, i) => ({ id: `${key}#${i}`, report_key: key, status: status(i) })));
+  const home = makeHome({
+    reports: { [keyA]: report({ title: 'Verified boundary study', domain: 'marketing', id: 'va', body: table(2000) }),
+      [keyB]: report({ title: 'Sampled boundary study', domain: 'marketing', id: 'sb', body: table(10000) }) },
+    verify: {
+      'marketing__2026-11-04-verified-boundary-study.claims.jsonl': records(keyA, 2000, (i) => (i < 1399 ? 'verified' : 'partial')),
+      'marketing__2026-11-04-sampled-boundary-study.claims.jsonl': records(keyB, 2499, () => 'partial'),
+    },
+    denylist: [],
+  });
+  try {
+    runBuild({ home, now: NOW });
+    const rows = Object.fromEntries(readRows(home).map((r) => [r.key, r]));
+    assert.deepEqual([rows[keyA].claims_verified, rows[keyA].claims_checked, rows[keyA].verified_rate, rows[keyA].verified_rate_band], [1399, 2000, 0.6995, '50-69%'],
+      'private: 69.95% is under 70%');
+    assert.deepEqual([rows[keyB].claims_sampled, rows[keyB].claims_in_report, rows[keyB].sampled_share, rows[keyB].sampled_share_band], [2499, 10000, 0.2499, '10-24%'],
+      'private: 24.99% is under 25%');
+    const md = shared(home);
+    assert.deepEqual(['50-69%', '70% or more', '10-24%', '25-49%'].map((b) => cellOf(md, b)), ['some', 'none', 'some', 'none'], 'shareable: the same bands');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+  assert.equal(verifiedRateBand({ release: 'blocked', claims_checked: 2000, claims_verified: 1400 }), '70% or more', '70.00% is 70% or more');
+  assert.equal(sampledShareBand({ release: 'blocked', claims_sampled: 2500, claims_in_report: 10000 }), '25-49%', '25.00% is 25% or more');
 });
