@@ -10,7 +10,8 @@
 //
 // Two tiers, because a name denylist can never be complete (look-alike letters from other scripts, new
 // spellings, names nobody listed). The shareable tier carries no text from any report, file name, Drive id or
-// ledger title: each report is an opaque id with enumerated, numeric and date fields, and before anything is
+// ledger title: each report is an opaque id with enumerated, numeric and date fields (plus the first 12 hex digits of
+// a recorded prompt hash), and before anything is
 // written every shareable word must come from this file's own vocabulary and every character must be printable
 // ASCII, or the build stops. The private tier keeps titles for the operator and is redacted best-effort.
 // Documents excluded by Drive id, quarantine or a private exclusion pattern are withheld from both tiers; only
@@ -103,8 +104,8 @@ export const ROLES = {
 // Columns. The private tier adds titles, keys, paths, Drive links, checker names and block reasons; the shareable
 // tier has only the opaque id and fields that are enumerated, numeric or dates.
 export const SHARE_COLUMNS = [
-  'row_id', 'domain', 'kind', 'source', 'created', 'age_days', 'producer', 'producer_mode', 'producer_model_recorded', 'producer_basis',
-  'run_started', 'run_finished', 'ledger_run_status', 'ledger_domain', 'cost_basis', 'window_pct_cost', 'weekly_pct_cost',
+  'row_id', 'domain', 'kind', 'source', 'created', 'age_days', 'producer', 'producer_mode', 'producer_model', 'producer_model_recorded', 'producer_basis',
+  'prompt_sha12', 'run_started', 'run_finished', 'ledger_run_status', 'ledger_domain', 'cost_basis', 'window_pct_cost', 'weekly_pct_cost',
   'source_urls', 'source_hosts', 'evidence', 'evidence_basis',
   'claims_in_report', 'claims_sampled', 'sampled_share', 'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted',
   'claims_unsupported', 'claims_garbled', 'claims_unreachable', 'claims_pending', 'verified_rate', 'supported_rate',
@@ -113,7 +114,7 @@ export const SHARE_COLUMNS = [
 ];
 export const PRIVATE_COLUMNS = [
   'row_id', 'key', 'title', 'domain', 'kind', 'source', 'created', 'age_days',
-  'producer', 'producer_mode', 'producer_model', 'producer_basis',
+  'producer', 'producer_mode', 'producer_model', 'producer_basis', 'prompt_sha256', 'prompt_bytes',
   'run_started', 'run_finished', 'ledger_run_status', 'ledger_domain', 'cost_basis', 'window_pct_cost', 'weekly_pct_cost',
   'drive_doc_id', 'drive_doc_url', 'local_path', 'source_urls', 'source_hosts', 'evidence', 'evidence_basis',
   'claims_in_report', 'claims_sampled', 'sampled_share', 'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted',
@@ -140,7 +141,10 @@ const ENUMS = {
   kind: ['deep-research', 'gemini-canvas', 'estate-doc', 'platform-catalog', 'unknown'],
   source: ['google-drive', 'local-file', 'live-catalogs', 'unknown'],
   producer: ['gemini-deep-research', 'gemini-chat', 'unknown'],
-  producer_mode: ['deep-research', 'unknown'],
+  // Model and mode labels as `usage run --model/--mode` recorded them, lowercased with spaces as '-'. A label not
+  // listed here is written as 'other'; extend the list when the app shows a new one.
+  producer_mode: ['deep-research', 'deep-think', 'canvas', 'chat', 'unknown'],
+  producer_model: ['gemini-3-pro', 'gemini-3-flash', 'gemini-3-deep-think', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-deep-think', 'unknown'],
   producer_basis: ['usage-ledger', 'front-matter-classifier', 'none'],
   ledger_run_status: ['done', 'abandoned', 'open'],
   cost_basis: ['no-ledger', 'no-ledger-run', 'measured', 'not-measured', 'ambiguous-repeated-title'],
@@ -378,6 +382,13 @@ const dateOf = (v) => (typeof v === 'string' && ISO_RE.test(v) ? v : null);
 const numOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const domainOf = (v) => (v === null || v === undefined ? null : PUBLIC_DOMAINS.has(v) ? v : OTHER);
 const OPAQUE_ID_RE = /^[0-9a-f]{12}$/;
+// A free-text label (model or mode as the app showed it) becomes an enum value or 'other', never text: lowercased,
+// runs of other characters as '-', and a bare model label ("3 Pro") tried with the 'gemini-' prefix.
+function labelOf(field, v) {
+  if (v === null || v === undefined) return null;
+  const slug = String(v).toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '');
+  return [slug, `gemini-${slug}`].find((s) => ENUMS[field].includes(s)) ?? OTHER;
+}
 
 export function shareRow(row) {
   const out = { row_id: OPAQUE_ID_RE.test(row.row_id) ? row.row_id : null, domain: domainOf(row.domain), ledger_domain: domainOf(row.ledger_domain) };
@@ -385,6 +396,9 @@ export function shareRow(row) {
   for (const f of SHARE_DATES) out[f] = dateOf(row[f]);
   for (const f of SHARE_NUMBERS) out[f] = numOf(row[f]);
   out.rank_score = row.rank_score === 'unranked' ? 'unranked' : numOf(row.rank_score);
+  out.producer_model = labelOf('producer_model', row.producer_model);
+  out.producer_mode = labelOf('producer_mode', row.producer_mode);
+  out.prompt_sha12 = typeof row.prompt_sha256 === 'string' && /^[0-9a-f]{64}$/.test(row.prompt_sha256) ? row.prompt_sha256.slice(0, 12) : null;
   out.producer_model_recorded = row.producer_model && row.producer_model !== 'unknown' ? 'yes' : 'no';
   out.checker_recorded = row.release === 'unsampled' ? null : row.checker ? 'yes' : 'no';
   return Object.fromEntries(SHARE_COLUMNS.map((c) => [c, out[c] ?? null]));
@@ -436,11 +450,14 @@ export function ledgerRuns(ledger) {
   const runs = rows.filter((r) => r.type === 'run').map((run) => {
     const next = rows.find((r) => r.type === 'run' && r.title === run.title && r.ts > run.ts);
     const end = rows.filter((r) => (r.type === 'done' || r.type === 'abandoned') && r.title === run.title)
-      .map((r) => ({ type: r.type, ts: r.at ?? r.ts }))
+      .map((r) => ({ type: r.type, ts: r.at ?? r.ts, docId: r.doc_id ?? null }))
       .filter((e) => e.ts >= run.ts && (!next || e.ts <= next.ts))
       .sort((a, b) => a.ts.localeCompare(b.ts))[0] ?? null;
     const status = !end ? 'open' : end.type === 'done' ? 'done' : 'abandoned';
-    return { title: run.title, domain: run.domain ?? null, started: run.ts, finished: status === 'done' ? end.ts : null, status };
+    // Recorded by `usage run --model --mode --prompt-file` and `usage done --doc-id`; older rows have none of them.
+    const details = { model: run.model ?? null, mode: run.mode ?? null, promptSha256: run.prompt_sha256 ?? null, promptBytes: run.prompt_bytes ?? null,
+      docId: status === 'done' ? end.docId : null };
+    return { title: run.title, domain: run.domain ?? null, started: run.ts, finished: status === 'done' ? end.ts : null, status, ...details };
   });
   const titles = new Set(runs.map((r) => r.title));
   const orphanCloseTitles = rows.filter((r) => (r.type === 'done' || r.type === 'abandoned') && !titles.has(r.title)).map((r) => r.title);
@@ -468,10 +485,15 @@ function inRunWindow(created, run) {
 
 // A run matches a report when their titles overlap and the report was created in the run's window. An abandoned
 // run produced no report by definition.
+// A run closed with a Drive doc id (`usage done --doc-id`) is matched by that id first, and is never matched by title
+// to a report with a different Drive id.
 export function matchRun(report, runs) {
+  const byDoc = report.driveId ? runs.find((run) => run.status === 'done' && run.docId === report.driveId) : null;
+  if (byDoc) return byDoc;
   const created = Date.parse(report.created);
   if (Number.isNaN(created)) return null;
-  const hits = runs.filter((run) => run.status !== 'abandoned' && titlesOverlap(report.title, run.title) && inRunWindow(created, run));
+  const otherDoc = (run) => Boolean(run.docId && report.driveId && run.docId !== report.driveId);
+  const hits = runs.filter((run) => run.status !== 'abandoned' && !otherDoc(run) && titlesOverlap(report.title, run.title) && inRunWindow(created, run));
   const endOf = (run) => Date.parse(run.finished ?? run.started);
   return hits.sort((a, b) => Math.abs(created - endOf(a)) - Math.abs(created - endOf(b)))[0] ?? null;
 }
@@ -486,8 +508,9 @@ export function excludedRuns(runs, excluded, kept) {
     const created = Date.parse(f.created);
     for (const run of runs) {
       const byTitle = titlesOverlap(f.title, run.title);
+      const byDoc = Boolean(f.driveId && run.docId === f.driveId);
       const byDomainTime = !keptRuns.has(run) && run.domain === f.domain && !Number.isNaN(created) && inRunWindow(created, run);
-      if (byTitle || byDomainTime) dropped.add(run);
+      if (byTitle || byDoc || byDomainTime) dropped.add(run);
     }
   }
   return dropped;
@@ -640,10 +663,13 @@ function reportRow(f, key, text, run, ctx) {
     row_id: rowIdFor(key, ctx.idSalt), key, title: f.title, domain: f.domain, kind: f.kind, source: f.source,
     created: f.created, age_days: Number.isNaN(created) ? null : Math.max(0, Math.floor((ctx.now - created) / DAY_MS)),
     producer: f.producer ?? (run ? 'gemini-deep-research' : 'unknown'),
-    producer_mode: f.mode ?? (run ? 'deep-research' : 'unknown'), producer_model: f.model ?? 'unknown',
+    // The usage ledger, when the run recorded them, is the authority for model and mode; never invented.
+    producer_mode: run?.mode ?? f.mode ?? (run ? 'deep-research' : 'unknown'), producer_model: run?.model ?? f.model ?? 'unknown',
     producer_basis: run ? 'usage-ledger' : f.producer ? 'front-matter-classifier' : 'none',
+    prompt_sha256: run?.promptSha256 ?? null, prompt_bytes: run?.promptBytes ?? null,
     ...ledgerColumns(run, ctx),
-    drive_doc_id: f.driveId, drive_doc_url: f.driveId ? `https://drive.google.com/open?id=${encodeURIComponent(f.driveId)}` : null,
+    drive_doc_id: f.driveId ?? run?.docId ?? null,
+    drive_doc_url: (f.driveId ?? run?.docId) ? `https://drive.google.com/open?id=${encodeURIComponent(f.driveId ?? run.docId)}` : null,
     local_path: `corpus/${key}`, source_urls: f.sourceUrls, source_hosts: f.sourceHosts, evidence: f.evidence, evidence_basis: f.evidenceBasis,
     ...claimColumns(ctx.claimSets.get(key), f, text),
   };

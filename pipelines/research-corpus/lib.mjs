@@ -175,6 +175,14 @@ export function dueDomains(inventory, domains, now = Date.now()) {
     .sort((a, b) => Number(b.due) - Number(a.due) || (b.ageDays ?? 1e9) - (a.ageDays ?? 1e9));
 }
 
+// A prompt is identified by its SHA-256 and byte length only; the usage ledger never holds prompt text.
+export function promptFingerprint(bytes) {
+  return { prompt_sha256: createHash('sha256').update(bytes).digest('hex'), prompt_bytes: bytes.length };
+}
+
+// The Drive id a `usage done --doc-id` may record: Drive ids are URL-safe base64 letters, digits, '-' and '_'.
+export const DRIVE_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
+
 export function usageToday(ledger, now = new Date()) {
   const day = now.toISOString().slice(0, 10);
   const today = ledger.filter((r) => String(r.ts).startsWith(day));

@@ -589,3 +589,40 @@ test('verified-rate gate: a sample of six verified and four partial claims is bl
   }
   for (const text of readers({ release: 'pass' })) assert.doesNotMatch(text, /verified (or|and) partial/i);
 });
+
+// Run transparency: model, mode, prompt hash and Drive doc id come from the usage ledger when it recorded them.
+const DOC_ID = '1PlaceholderDoc_0123';
+const PROMPT_SHA = createHash('sha256').update('synthetic prompt for a placeholder run').digest('hex');
+const detailedLedger = ({ model = 'Gemini 3 Pro', domain = 'agentic-income-streams' } = {}) => [
+  reading('2026-11-04T16:00:00.000Z', 10, 20),
+  { ts: '2026-11-04T16:01:00.000Z', type: 'run', domain, title: 'Unrelated run label', model, mode: 'Deep Research',
+    prompt_sha256: PROMPT_SHA, prompt_bytes: 38, note: 'synthetic run note' },
+  { ts: '2026-11-04T16:40:00.000Z', type: 'done', title: 'Unrelated run label', doc_id: DOC_ID },
+  reading('2026-11-04T16:41:00.000Z', 40, 23),
+];
+
+test('run details from the ledger: the private tier keeps the labels, the shareable tier only enums and 12 hex of the prompt hash', () => {
+  const study = report({ title: TITLE, domain: 'agentic-income-streams', id: DOC_ID, body: TABLE_BODY });
+  for (const [model, shared] of [['Gemini 3 Pro', 'gemini-3-pro'], ['3 Pro', 'gemini-3-pro'], ['Some Future Model X', 'other']]) {
+    const home = makeHome({ reports: { [KEY]: study }, ledger: detailedLedger({ model }) });
+    try {
+      runBuild({ home, now: NOW });
+      const [r] = readRows(home);
+      assert.equal(r.run_started, '2026-11-04T16:01:00.000Z', 'matched by Drive doc id, although the titles differ');
+      assert.deepEqual([r.producer_model, r.producer_mode, r.prompt_sha256, r.prompt_bytes, r.drive_doc_id], [model, 'Deep Research', PROMPT_SHA, 38, DOC_ID]);
+      const [s] = rowsOf(home, 'shareable');
+      assert.deepEqual([s.producer_model, s.producer_mode, s.prompt_sha12, s.producer_model_recorded], [shared, 'deep-research', PROMPT_SHA.slice(0, 12), 'yes']);
+      const shareText = tierText(home, 'shareable');
+      assert.ok(!shareText.includes(PROMPT_SHA) && !shareText.includes(model), 'no full hash and no raw label in the shareable tier');
+      assert.ok(!allOutputs(home).includes('synthetic run note'), 'the run note stays in the ledger');
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }
+});
+
+test('a run closed with an excluded document\'s Drive id is withheld with it, even in another domain and under another title', () => {
+  const excluded = report({ title: 'Withheld Placeholder Study', domain: 'agentic-income-streams', id: DOC_ID, body: TABLE_BODY });
+  const { runRows, rows } = buildRegistry({ reports: [{ key: KEY, text: excluded }], ledger: detailedLedger({ domain: 'marketing' }), domains, now: NOW,
+    exclusionIds: new Set([DOC_ID]) });
+  assert.equal(rows.length, 0);
+  assert.equal(runRows.length, 0, 'the doc-linked run is dropped before any ledger table or count');
+});

@@ -13,9 +13,10 @@
 //   node corpus.mjs brief                writes the session brief from live model catalogs
 //   node corpus.mjs queue                domains whose newest report is past its window
 //   node corpus.mjs usage snapshot --remaining N [--note "..."]   record a reading from the Gemini app
-//   node corpus.mjs usage run --domain <id> --title "<topic>"     log a Deep Research run
+//   node corpus.mjs usage run --domain <id> --title "<topic>" [--model "<label>"] [--mode "<mode>"] [--prompt-file <path>] [--note "..."]
+//                                                                 log a Deep Research run (the prompt as SHA-256 and byte length only)
 //   node corpus.mjs usage reading --session P --weekly P [...]   record the Usage limits page (percent meter)
-//   node corpus.mjs usage done --title "<topic>"                 mark a run finished (pair with a reading after it)
+//   node corpus.mjs usage done --title "<topic>" [--doc-id <id>]  mark a run finished (pair with a reading after it)
 //   node corpus.mjs usage abandon --title "<topic>" [--at ISO]    close a stalled run; never measured, stops blocking others
 //   node corpus.mjs usage plan                                   measured % cost per run, runs left this window/week
 //   node corpus.mjs usage show
@@ -33,7 +34,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
   localFrontMatter, slugify, usageToday, usagePlan, evidenceStats, chunkMarkdown, bm25Rank,
-  drawSample, releaseMinimum, scoreClaims, claimChecklist, pipelineHealth, openRunFor,
+  drawSample, releaseMinimum, scoreClaims, claimChecklist, pipelineHealth, openRunFor, promptFingerprint, DRIVE_ID_RE,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -451,8 +452,8 @@ function cmdUsage() {
   } else if (sub === 'run') {
     const [domain, title] = [flag('domain'), flag('title')];
     if (!domains.some((d) => d.id === domain)) die(`--domain must be one of: ${domains.map((d) => d.id).join(', ')}`);
-    if (!title) die('usage: usage run --domain <id> --title "<topic>" (done and abandon close a run by its title)');
-    appendFileSync(P.usage, JSON.stringify({ ts, type: 'run', domain, title }) + '\n');
+    if (!title) die('usage: usage run --domain <id> --title "<topic>" [--model "<label>"] [--mode "<mode>"] [--prompt-file <path>] [--note "..."] (done and abandon close a run by its title)');
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'run', domain, title, ...runDetails() }) + '\n');
   } else if (sub === 'reading') {
     const [s, w] = [flag('session'), flag('weekly')];
     if (s === undefined || w === undefined) die('usage: usage reading --session <pct> --weekly <pct> [--session-resets "19:18"] [--weekly-resets "10 Nov 15:18"] [--shot <file>]');
@@ -461,10 +462,11 @@ function cmdUsage() {
       sessionResets: flag('session-resets') ?? null, weeklyResets: flag('weekly-resets') ?? null, shot: flag('shot') ?? null,
     }) + '\n');
   } else if (sub === 'done') {
-    const title = flag('title');
-    if (!title) die('usage: usage done --title "<run title>"');
+    const [title, docId] = [flag('title'), optional('doc-id')];
+    if (!title) die('usage: usage done --title "<run title>" [--doc-id <Drive doc id>]');
+    if (docId !== undefined && !DRIVE_ID_RE.test(docId)) die('--doc-id must be a Drive document id (letters, digits, - and _)');
     requireOpenRun(title, ts);
-    appendFileSync(P.usage, JSON.stringify({ ts, type: 'done', title }) + '\n');
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'done', title, ...(docId !== undefined ? { doc_id: docId } : {}) }) + '\n');
   } else if (sub === 'abandon') {
     // A run that stalled or produced no report: closed, never measured. --at is when it stopped (ISO).
     const [title, at] = [flag('title'), flag('at')];
@@ -477,6 +479,29 @@ function cmdUsage() {
     return;
   } else if (sub !== 'show') die('usage: usage snapshot|run|reading|done|abandon|plan|show');
   console.log(JSON.stringify(usageToday(readUsage()), null, 2));
+}
+
+// An optional --name value: undefined when the flag is absent; a flag given without a value is refused.
+function optional(name) {
+  if (!has(name)) return undefined;
+  const v = flag(name);
+  if (v === undefined || v.startsWith('--') || !v.trim()) die(`--${name} needs a value`);
+  return v;
+}
+
+// What the app showed for a run. Usage show and plan ignore these fields; the registry reads them.
+function runDetails() {
+  const out = {};
+  for (const name of ['model', 'mode', 'note']) {
+    const v = optional(name);
+    if (v !== undefined) out[name] = v;
+  }
+  const promptFile = optional('prompt-file');
+  if (promptFile !== undefined) {
+    if (!existsSync(promptFile) || !statSync(promptFile).isFile()) die(`no prompt file at ${promptFile}`);
+    Object.assign(out, promptFingerprint(readFileSync(promptFile)));
+  }
+  return out;
 }
 
 // A closure that matches no open run would be recorded, leave the intended run open, and make every

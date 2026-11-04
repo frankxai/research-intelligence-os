@@ -110,12 +110,14 @@ A Claude Code SessionStart hook prints `~/.starlight/brief/session-brief.md`, so
 Gemini Ultra meters usage in percent, not runs: `gemini.google.com/usage` shows a rolling window ("Current usage", resets in about five hours) and a weekly limit. Third-party per-day counts (120, 200) are not what the app enforces. The ledger measures the real cost per run:
 
 1. Before a run: read the Usage limits page (neo helper `readUsage`) and `node corpus.mjs usage reading --session P --weekly P --session-resets "HH:MM" --weekly-resets "D Mon HH:MM" --shot <file>`.
-2. Start it: `usage run --domain <id> --title "<topic>"` (the title is required: it is how the run is closed).
-3. When it finishes: `usage done --title "<topic>"`, then another `usage reading`.
+2. Start it: `usage run --domain <id> --title "<topic>"` (the title is required: it is how the run is closed). Optional: `--model "<label shown in the app>"`, `--mode "<e.g. deep-research>"`, `--prompt-file <path>` and `--note "..."`. The prompt file is recorded only as its SHA-256 and byte length; its text never enters the ledger.
+3. When it finishes: `usage done --title "<topic>"` (optional `--doc-id <Drive doc id>` of the report it produced), then another `usage reading`.
 4. `usage plan` returns the mean weekly and window percent per run, runs left this window and week, and runs per week. A run is measured only when it is the only run between its two readings, and not when any reading from the first to the second shows a meter fall or announces a session or weekly reset before the second, so take a reading between runs until you have three measured runs.
 5. A run that stalls or ends without a report: `usage abandon --title "<topic>" --at <ISO time it stopped>`. Until it is closed, every later run counts as overlapping it and cannot be measured.
 
 `done` and `abandon` refuse a title that matches no open run at that time and list the runs that are open, so a typo cannot leave the real run open.
+
+`usage show` and `usage plan` ignore the model, mode, prompt and doc id fields, and rows written before they existed measure the same. The registry reads them when present: a run closed with `--doc-id` is matched to the report with that Drive id before any title match; the private tier keeps the model and mode labels and the full prompt hash; the shareable tier maps model and mode to a fixed list or `other` and keeps only the first 12 hex digits of the prompt hash. A 12-digit prefix can still confirm a guess of a short or standard prompt, so do not record a prompt file whose wording is itself confidential.
 
 ## NotebookLM
 

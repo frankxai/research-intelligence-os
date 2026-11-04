@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -832,4 +833,42 @@ test('a CRLF report keeps its digest when only exported: changes, and its front 
   assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
   writeFileSync(report, crlfReport('2026-11-06T00:00:00Z'));
   assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
+});
+
+// Run transparency: what the app showed for a run, with the prompt kept out of the ledger.
+test('usage run records model, mode, note and the prompt as SHA-256 and length only; usage done records a Drive doc id', (t) => {
+  const { home, cli } = sandbox(t);
+  const prompt = path.join(home, 'prompt.txt');
+  writeFileSync(prompt, 'SYNTHETIC-PROMPT-MARKER: survey placeholder topics\n');
+  const ledgerRows = () => readFileSync(path.join(home, 'gemini-usage.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const run = cli('usage', 'run', '--domain', 'solana', '--title', 'placeholder run', '--model', 'Gemini 3 Pro', '--mode', 'Deep Research',
+    '--prompt-file', prompt, '--note', 'synthetic note');
+  assert.equal(run.status, 0, run.stderr);
+  assert.notEqual(cli('usage', 'done', '--title', 'placeholder run', '--doc-id', 'not a doc id!').status, 0, 'a malformed doc id is refused');
+  assert.equal(cli('usage', 'done', '--title', 'placeholder run', '--doc-id', '1AbC-dEf_0123456789').status, 0);
+  assert.notEqual(cli('usage', 'run', '--domain', 'solana', '--title', 'x', '--prompt-file', path.join(home, 'missing.txt')).status, 0);
+  assert.notEqual(cli('usage', 'run', '--domain', 'solana', '--title', 'x', '--model').status, 0, 'a flag without a value is refused');
+  const text = readFileSync(path.join(home, 'gemini-usage.jsonl'), 'utf8');
+  assert.ok(!text.includes('SYNTHETIC-PROMPT-MARKER') && !text.includes('placeholder topics'), 'the prompt text never reaches the ledger');
+  const [runRow, doneRow, ...rest] = ledgerRows();
+  assert.equal(rest.length, 0, 'refused commands write nothing');
+  const bytes = readFileSync(prompt);
+  assert.deepEqual([runRow.model, runRow.mode, runRow.note, runRow.prompt_sha256, runRow.prompt_bytes],
+    ['Gemini 3 Pro', 'Deep Research', 'synthetic note', createHash('sha256').update(bytes).digest('hex'), bytes.length]);
+  assert.equal(doneRow.doc_id, '1AbC-dEf_0123456789');
+});
+
+test('usage plan and show ignore run details, so old rows and detailed rows measure the same', () => {
+  const plain = [
+    { ts: '2026-11-04T10:00:00Z', type: 'reading', sessionPct: 2, weeklyPct: 4 },
+    { ts: '2026-11-04T10:01:00Z', type: 'run', domain: 'solana', title: 'a' },
+    { ts: '2026-11-04T10:40:00Z', type: 'done', title: 'a' },
+    { ts: '2026-11-04T10:41:00Z', type: 'reading', sessionPct: 12, weeklyPct: 6 },
+  ];
+  const detailed = plain.map((r) => (r.type === 'run' ? { ...r, model: 'Gemini 3 Pro', mode: 'deep-research', prompt_sha256: 'f'.repeat(64), prompt_bytes: 10, note: 'n' }
+    : r.type === 'done' ? { ...r, doc_id: '1AbC-dEf_0123456789' } : r));
+  assert.deepEqual(usagePlan(detailed), usagePlan(plain));
+  assert.equal(usagePlan(detailed).measuredRuns, 1);
+  const now = new Date('2026-11-04T12:00:00Z');
+  assert.deepEqual(usageToday(detailed, now), usageToday(plain, now));
 });
