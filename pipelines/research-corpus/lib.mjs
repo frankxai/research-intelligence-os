@@ -35,7 +35,11 @@ export function routeDomain(title, domains) {
 export function classifyKind(file, personalPatterns) {
   const lower = file.title.toLowerCase();
   if (personalPatterns.some((p) => p && lower.includes(p.toLowerCase()))) return 'personal';
-  if (file.mimeType !== DOC_MIME) return 'other';
+  // With --drive-export-formats md, rclone lists a native Google Doc as text/markdown with size -1;
+  // an uploaded .md file has a real size, so the pair identifies native Docs.
+  const mime = String(file.mimeType ?? '');
+  const nativeDocExport = mime.startsWith('text/markdown') && Number(file.fileSize ?? 0) < 0;
+  if (mime !== DOC_MIME && !nativeDocExport) return 'other';
   // rclone reports native Docs as size -1; then the title is the only signal.
   const bytes = Number(file.fileSize ?? -1);
   const longEnough = bytes <= 0 || bytes >= DEEP_RESEARCH_MIN_BYTES;
@@ -133,7 +137,46 @@ export function usageToday(ledger, now = new Date()) {
   const today = ledger.filter((r) => String(r.ts).startsWith(day));
   const runs = today.filter((r) => r.type === 'run').length;
   const snapshots = ledger.filter((r) => r.type === 'snapshot');
-  return { day, runs, lastSnapshot: snapshots.at(-1) ?? null };
+  const readings = ledger.filter((r) => r.type === 'reading');
+  return { day, runs, lastSnapshot: snapshots.at(-1) ?? null, lastReading: readings.at(-1) ?? null };
+}
+
+// Gemini Ultra meters usage in percent: a rolling window and a weekly limit, not a run count.
+// A run's cost is the rise in each percentage between the last reading before it started
+// and the first reading after it finished (a 'done' record). Overlapping runs are skipped
+// because their cost cannot be separated.
+export function usagePlan(ledger) {
+  const rows = [...ledger].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  const readings = rows.filter((r) => r.type === 'reading');
+  const costs = [];
+  for (const run of rows.filter((r) => r.type === 'run')) {
+    const done = rows.find((r) => r.type === 'done' && r.title === run.title && r.ts >= run.ts);
+    if (!done) continue;
+    const overlaps = rows.some((r) => {
+      if (r.type !== 'run' || r === run) return false;
+      const rDone = rows.find((d) => d.type === 'done' && d.title === r.title && d.ts >= r.ts);
+      return r.ts < done.ts && (!rDone || rDone.ts > run.ts);
+    });
+    const before = readings.filter((r) => r.ts <= run.ts).at(-1);
+    const after = readings.find((r) => r.ts >= done.ts);
+    if (overlaps || !before || !after) continue;
+    costs.push({
+      title: run.title, domain: run.domain,
+      weekly: after.weeklyPct - before.weeklyPct, session: after.sessionPct - before.sessionPct,
+    });
+  }
+  const mean = (key) => (costs.length ? costs.reduce((s, c) => s + c[key], 0) / costs.length : null);
+  const weeklyPerRun = mean('weekly');
+  const sessionPerRun = mean('session');
+  const latest = readings.at(-1) ?? null;
+  const left = (pct, per) => (latest && per > 0 ? Math.floor((100 - pct) / per) : null);
+  return {
+    measuredRuns: costs.length, costs, weeklyPerRun, sessionPerRun, latest,
+    runsLeftThisWeek: left(latest?.weeklyPct, weeklyPerRun),
+    runsLeftThisWindow: left(latest?.sessionPct, sessionPerRun),
+    runsPerWeek: weeklyPerRun > 0 ? Math.floor(100 / weeklyPerRun) : null,
+    runsPerWindow: sessionPerRun > 0 ? Math.floor(100 / sessionPerRun) : null,
+  };
 }
 
 function perMillion(perToken) {
@@ -214,6 +257,8 @@ export function briefMarkdown({ now, workersAi, gateway, inventory, due, usage }
 
   out.push('## Gemini Deep Research usage');
   const snap = usage.lastSnapshot;
+  const rd = usage.lastReading;
+  if (rd) out.push(`Meter ${rd.ts.slice(0, 16)}: window ${rd.sessionPct}% used (resets ${rd.sessionResets}), week ${rd.weeklyPct}% used (resets ${rd.weeklyResets}).`);
   out.push(`Today: ${usage.runs} run(s) logged.` + (snap
     ? ` Last app reading ${snap.ts.slice(0, 16)}: ${snap.remaining ?? '?'} Deep Research left${snap.note ? ` (${snap.note})` : ''}.`
     : ' No app reading recorded yet; Google no longer publishes a fixed Ultra quota, so read it from the app.'));

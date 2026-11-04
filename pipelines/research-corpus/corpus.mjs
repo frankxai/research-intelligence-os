@@ -14,6 +14,9 @@
 //   node corpus.mjs queue                domains whose newest report is past its window
 //   node corpus.mjs usage snapshot --remaining N [--note "..."]   record a reading from the Gemini app
 //   node corpus.mjs usage run --domain <id> --title "<topic>"     log a Deep Research run
+//   node corpus.mjs usage reading --session P --weekly P [...]   record the Usage limits page (percent meter)
+//   node corpus.mjs usage done --title "<topic>"                 mark a run finished (pair with a reading after it)
+//   node corpus.mjs usage plan                                   measured % cost per run, runs left this window/week
 //   node corpus.mjs usage show
 //
 // All private state lives in RESEARCH_HOME (default ~/.starlight/research), never in this repo.
@@ -25,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
-  localFrontMatter, slugify, usageToday,
+  localFrontMatter, slugify, usageToday, usagePlan,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -299,7 +302,19 @@ function cmdUsage() {
     const domain = flag('domain');
     if (!domains.some((d) => d.id === domain)) die(`--domain must be one of: ${domains.map((d) => d.id).join(', ')}`);
     appendFileSync(P.usage, JSON.stringify({ ts, type: 'run', domain, title: flag('title') ?? null }) + '\n');
-  } else if (sub !== 'show') die('usage: usage snapshot|run|show');
+  } else if (sub === 'reading') {
+    const [s, w] = [flag('session'), flag('weekly')];
+    if (s === undefined || w === undefined) die('usage: usage reading --session <pct> --weekly <pct> [--session-resets "19:18"] [--weekly-resets "10 Nov 15:18"] [--shot <file>]');
+    appendFileSync(P.usage, JSON.stringify({
+      ts, type: 'reading', sessionPct: Number(s), weeklyPct: Number(w),
+      sessionResets: flag('session-resets') ?? null, weeklyResets: flag('weekly-resets') ?? null, shot: flag('shot') ?? null,
+    }) + '\n');
+  } else if (sub === 'done') {
+    appendFileSync(P.usage, JSON.stringify({ ts, type: 'done', title: flag('title') ?? null }) + '\n');
+  } else if (sub === 'plan') {
+    console.log(JSON.stringify(usagePlan(readUsage()), null, 2));
+    return;
+  } else if (sub !== 'show') die('usage: usage snapshot|run|reading|done|plan|show');
   console.log(JSON.stringify(usageToday(readUsage()), null, 2));
 }
 

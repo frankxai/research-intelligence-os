@@ -77,7 +77,12 @@ A Claude Code SessionStart hook prints `~/.starlight/brief/session-brief.md`, so
 
 ## Gemini usage
 
-Since May 2026 Google no longer publishes a fixed Ultra Deep Research quota, and third-party figures conflict (120 and 200 per day). The ledger records the count the app shows and each run.
+Gemini Ultra meters usage in percent, not runs: `gemini.google.com/usage` shows a rolling window ("Current usage", resets in about five hours) and a weekly limit. Third-party per-day counts (120, 200) are not what the app enforces. The ledger measures the real cost per run:
+
+1. Before a run: read the Usage limits page (neo helper `readUsage`) and `node corpus.mjs usage reading --session P --weekly P --session-resets "HH:MM" --weekly-resets "D Mon HH:MM" --shot <file>`.
+2. Start it: `usage run --domain <id> --title "<topic>"`.
+3. When it finishes: `usage done --title "<topic>"`, then another `usage reading`.
+4. `usage plan` returns the mean weekly and window percent per run, runs left this window and week, and runs per week. Overlapping runs are skipped because their cost cannot be separated, so run one at a time until you have three measured runs.
 
 ## NotebookLM
 

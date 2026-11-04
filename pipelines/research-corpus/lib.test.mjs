@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, usageToday } from './lib.mjs';
+import { briefMarkdown, catalogMarkdown, classify, classifyKind, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, usageToday, usagePlan } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
 const DOC = 'application/vnd.google-apps.document';
@@ -135,4 +135,44 @@ test('the brief degrades honestly when catalogs are unavailable', () => {
   const md = briefMarkdown({ now: new Date('2026-11-01T00:00:00Z'), workersAi: null, gateway: null, inventory: [], due: [], usage: { runs: 0, lastSnapshot: null } });
   assert.match(md, /Workers AI: catalog unavailable/);
   assert.match(md, /No app reading recorded yet/);
+});
+
+test('usagePlan measures percent cost per run and projects runs left', () => {
+  const ledger = [
+    { ts: '2026-11-04T10:00:00Z', type: 'reading', sessionPct: 2, weeklyPct: 4 },
+    { ts: '2026-11-04T10:01:00Z', type: 'run', domain: 'solana', title: 'a' },
+    { ts: '2026-11-04T10:40:00Z', type: 'done', title: 'a' },
+    { ts: '2026-11-04T10:41:00Z', type: 'reading', sessionPct: 12, weeklyPct: 6 },
+    { ts: '2026-11-04T11:00:00Z', type: 'run', domain: 'bitcoin', title: 'b' },
+    { ts: '2026-11-04T11:30:00Z', type: 'done', title: 'b' },
+    { ts: '2026-11-04T11:31:00Z', type: 'reading', sessionPct: 22, weeklyPct: 8 },
+  ];
+  const plan = usagePlan(ledger);
+  assert.equal(plan.measuredRuns, 2);
+  assert.equal(plan.weeklyPerRun, 2);
+  assert.equal(plan.sessionPerRun, 10);
+  assert.equal(plan.runsLeftThisWeek, 46);
+  assert.equal(plan.runsLeftThisWindow, 7);
+  assert.equal(plan.runsPerWeek, 50);
+});
+
+test('usagePlan skips overlapping runs and runs without a reading on both sides', () => {
+  const ledger = [
+    { ts: '2026-11-04T10:00:00Z', type: 'reading', sessionPct: 0, weeklyPct: 0 },
+    { ts: '2026-11-04T10:01:00Z', type: 'run', title: 'a' },
+    { ts: '2026-11-04T10:02:00Z', type: 'run', title: 'b' },
+    { ts: '2026-11-04T10:40:00Z', type: 'done', title: 'a' },
+    { ts: '2026-11-04T10:41:00Z', type: 'done', title: 'b' },
+    { ts: '2026-11-04T10:42:00Z', type: 'reading', sessionPct: 20, weeklyPct: 4 },
+  ];
+  const plan = usagePlan(ledger);
+  assert.equal(plan.measuredRuns, 0);
+  assert.equal(plan.runsLeftThisWeek, null);
+});
+
+test('classifyKind treats rclone-exported native Docs (markdown, size -1) as documents but not uploaded .md files', () => {
+  const native = { title: 'Long Research Report', mimeType: 'text/markdown; charset=utf-8', fileSize: -1 };
+  const uploaded = { title: 'readme', mimeType: 'text/markdown; charset=utf-8', fileSize: 4200 };
+  assert.equal(classifyKind(native, []), 'deep-research');
+  assert.equal(classifyKind(uploaded, []), 'other');
 });
