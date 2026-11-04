@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, usageToday } from './lib.mjs';
+import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, staleDriveKeys, usageToday } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
 const DOC = 'application/vnd.google-apps.document';
@@ -127,4 +127,22 @@ test('the brief degrades honestly when catalogs are unavailable', () => {
   const md = briefMarkdown({ now: new Date('2026-11-01T00:00:00Z'), workersAi: null, gateway: null, inventory: [], due: [], usage: { runs: 0, lastSnapshot: null } });
   assert.match(md, /Workers AI: catalog unavailable/);
   assert.match(md, /No app reading recorded yet/);
+});
+
+test('staleDriveKeys keeps included exports and flags excluded, re-routed or vanished ones', () => {
+  const inventory = classify([
+    doc('keep', 'Cloudflare and Vercel Architecture Hub', 364108),
+    doc('gone', 'Personal journal reflections', 90000),
+  ], { domains });
+  const keep = corpusKey(inventory.find((e) => e.id === 'keep'));
+  const driveKeys = [keep, 'ai-models-platforms/2026-10-28-personal-journal-reflections.md', 'unrouted/2026-10-28-cloudflare-and-vercel-architecture-hub.md'];
+  assert.deepEqual(staleDriveKeys({ driveKeys, inventory }), [
+    'ai-models-platforms/2026-10-28-personal-journal-reflections.md',
+    'unrouted/2026-10-28-cloudflare-and-vercel-architecture-hub.md',
+  ]);
+});
+
+test('staleDriveKeys with nothing stale returns an empty list', () => {
+  const inventory = classify([doc('a', 'Cloudflare and Vercel Architecture Hub', 364108)], { domains });
+  assert.deepEqual(staleDriveKeys({ driveKeys: [corpusKey(inventory[0])], inventory }), []);
 });
