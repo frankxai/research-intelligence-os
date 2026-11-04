@@ -422,6 +422,9 @@ export const CLAIM_STATUSES = ['pending', 'verified', 'partial', 'unsupported', 
 // Hypotheses, not calibrated values: they gate a report's release, never rank it.
 const MAX_FAILED_SHARE = 0.2;
 const MAX_UNREACHABLE_SHARE = 0.3;
+// Verified claims over checked claims. Partial counts as supported for MAX_FAILED_SHARE but not here: a
+// partial claim carries details the cited page does not state, so a sample of mostly partials is blocked.
+export const MIN_VERIFIED_RATE = 0.7;
 
 const URL_RE = /https?:\/\/[^\s<>()[\]|,"'`]+/g;
 
@@ -742,6 +745,9 @@ export function scoreClaims(records, { reportKey = null, reportText: raw = null,
   if (unattributed) blocks.push(`${unattributed} verified, partial or contradicted claim(s) have no source URL the report cites`);
   if (byStatus.contradicted) blocks.push(`${byStatus.contradicted} claim(s) contradicted by the cited source`);
   if (checked && failed / checked > MAX_FAILED_SHARE) blocks.push(`${failed}/${checked} checked claims unsupported, contradicted or garbled (limit ${MAX_FAILED_SHARE * 100}%)`);
+  if (checked && byStatus.verified / checked < MIN_VERIFIED_RATE) {
+    blocks.push(`verified rate ${Math.round((byStatus.verified / checked) * 100)}% is below the ${Math.round(MIN_VERIFIED_RATE * 100)}% minimum (partial claims carry details the cited page does not state)`);
+  }
   if (records.length && byStatus.unreachable / records.length > MAX_UNREACHABLE_SHARE) blocks.push('too many unreachable sources to judge the sample');
   if (byStatus.pending) blocks.push(`${byStatus.pending} claim(s) not yet checked`);
   return {

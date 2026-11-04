@@ -27,7 +27,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  DEFAULT_PERSONAL_PATTERNS, classifyKind, evidenceStats, extractClaims, normalizeEol, scoreClaims, usagePlan,
+  DEFAULT_PERSONAL_PATTERNS, MIN_VERIFIED_RATE, classifyKind, evidenceStats, extractClaims, normalizeEol, scoreClaims, usagePlan,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -157,10 +157,11 @@ const SHARE_NUMBERS = [
 ];
 const SHARE_DATES = ['created', 'run_started', 'run_finished', 'checked_at'];
 
-// How a person and an agent should consume a report, by what has been checked, not by topic. A pass covers
-// only the sampled claims a checker supported; it says nothing about the rest of the report.
+// How a person and an agent should consume a report, by what has been checked, not by topic. A pass licenses
+// citing only the sampled claims a checker verified, never the report as a whole: a partial claim carries details
+// its source does not state, and the rest of the report was never checked.
 const READERS = {
-  pass: ['Trust only the sampled claims marked verified or partial, as of their check date; the rest is unverified AI synthesis.', 'Use only verified and partial claim records, each with its source and date; treat everything else in the report as unverified.'],
+  pass: ['Cite only the sampled claims marked verified, as of their check date; partial claims and the rest of the report are unverified AI synthesis.', 'Use only verified claim records, each with its source and date; treat partial claims and everything else in the report as unverified.'],
   blocked: ['Read the blocked and contradicted claims first; use it for direction, not numbers.', 'Use only verified claim records; never repeat contradicted or unchecked claims.'],
   local: ['Estate document as of its recorded commit; check for a newer version.', 'Cite with path and commit; re-read the source when it may have changed.'],
   cited: ['Skim as unverified AI synthesis; check any number before acting on it.', 'Retrieve for orientation only; label every statement unverified-ai-synthesis.'],
@@ -182,7 +183,9 @@ const TEXT = {
   headShare: '# Research registry: shareable tier',
   notePrivate: '> **Private: do not share.** This tier holds titles, corpus keys, file paths and Drive links. Names are redacted against the private name list on a best-effort basis only: look-alike letters from another script, and a name glued to the next word by an invisible character, are not caught. Share `registry/shareable/` instead.',
   noteShare: '> **Shareable.** This tier holds no titles, file paths, corpus keys, Drive ids or links, and no text taken from a report or a ledger title. Each report is an opaque id (the first 12 hex digits of the SHA-256 of its corpus key) with enumerated, numeric and date fields only. Before writing, every character was checked to be printable ASCII and every word to be in the registry vocabulary; anything else stops the build.',
-  hypotheses: '> **Weights are hypotheses.** The rank score only orders what to review next; it never releases a report. Release comes only from the claim gate (`node corpus.mjs verify score <key>`): `pass` or `blocked`. A pass covers only the sampled claims a checker supported, never the whole report. A report with no claim records is `unsampled`, and its rank is `unranked`.',
+  hypotheses: '> **Weights are hypotheses.** The rank score only orders what to review next; it never releases a report. Release comes only from the claim gate (`node corpus.mjs verify score <key>`): `pass` or `blocked`. '
+    + `A pass needs at least ${Math.round(MIN_VERIFIED_RATE * 100)}% of checked claims verified, and it licenses citing only the sampled claims a checker verified, never the report as a whole. `
+    + 'A report with no claim records is `unsampled`, and its rank is `unranked`.',
   built: 'Built {at} from {n} corpus reports; {w} excluded, withheld (excluded by Drive id, quarantine or the pipeline exclusion rules: no row, ledger run, cost or claim diagnostic in either tier). reports.csv and reports.jsonl hold every column of this tier; roles.csv holds the role relevance matrix; all three share `row_id`, a pseudonym keyed by a private salt.',
   aFew: 'a few',
   paths: 'Paths are relative to RESEARCH_HOME.',

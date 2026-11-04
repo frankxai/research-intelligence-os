@@ -564,3 +564,28 @@ test('review 7.5: migration removes legacy outputs and the temporary files an in
     for (const s of stale) assert.equal(existsSync(path.join(home, 'registry', ...s.split('/'))), false, s);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
+
+// A ten-claim synthetic study: the minimum sample is ten, so every claim is checked.
+const TEN_CLAIMS = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet'];
+const TEN_STUDY = report({ title: TITLE, domain: 'agentic-income-streams', body: [
+  '# Study', '', '| Claim | Source URL | Date |', '|---|---|---|',
+  ...TEN_CLAIMS.map((n) => `| Tool ${n} offers a free plan | https://${n}.example.com/plans | 2026-10 |`), '',
+].join('\n') });
+
+test('verified-rate gate: a sample of six verified and four partial claims is blocked in the registry, and pass guidance never licenses partials', () => {
+  const { records, manifest } = drawSample(TEN_STUDY, { reportKey: KEY, n: 10, sampledAt: '2026-11-04T18:00:00.000Z' });
+  const fill = (verified) => records.map((r, i) => ({
+    ...r, status: i < verified ? 'verified' : 'partial', excerpt: 'quoted', checker: 'independent-test-checker', checked_at: '2026-11-04T19:00:00.000Z',
+  }));
+  for (const [verified, release] of [[6, 'blocked'], [7, 'pass']]) {
+    const home = makeHome({ reports: { [KEY]: TEN_STUDY }, verify: { [`${STEM}.claims.jsonl`]: jsonl(fill(verified)), [`${STEM}.manifest.json`]: JSON.stringify(manifest) } });
+    try {
+      runBuild({ home, now: NOW });
+      const [r] = readRows(home);
+      assert.equal(r.release, release, JSON.stringify(r.release_blocks));
+      if (release === 'blocked') assert.ok(r.release_blocks.some((b) => /verified rate 60% is below the 70% minimum/.test(b)));
+      assert.equal(rowsOf(home, 'shareable')[0].release, release);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }
+  for (const text of readers({ release: 'pass' })) assert.doesNotMatch(text, /verified (or|and) partial/i);
+});

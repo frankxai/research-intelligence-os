@@ -323,19 +323,37 @@ test('claim records start pending with the evidence fields; scoreClaims blocks r
   assert.equal(records[0].schema, CLAIM_SCHEMA);
   for (const f of ['claim', 'source_url', 'excerpt', 'source_date', 'status', 'contradictions', 'report_sha256', 'sample_from']) assert.ok(f in records[0], f);
   assert.equal(scoreOf(records).release, 'blocked');
-  // Four distinct claims, so one unreachable source stays under the 30% limit.
-  const four = tableReport(4);
-  const sample = sampleOf(four);
-  const score = (statuses) => scoreOf(sample.map((r, i) => ({ ...r, ...EVIDENCE, status: statuses[i] })), four);
-  const pass = score(['verified', 'partial', 'verified', 'unreachable']);
-  assert.equal(pass.release, 'pass');
-  assert.equal(pass.checked, 3, 'unreachable sources are not counted as checked');
-  assert.equal(pass.verifiedRate, 0.667);
+  // Ten distinct claims, so one unreachable source stays under the 30% limit.
+  const ten = tableReport(10);
+  const sample = sampleOf(ten);
+  const score = (statuses) => scoreOf(sample.map((r, i) => ({ ...r, ...EVIDENCE, status: statuses[i] })), ten);
+  const pass = score([...Array(7).fill('verified'), 'partial', 'partial', 'unreachable']);
+  assert.equal(pass.release, 'pass', pass.blocks.join('; '));
+  assert.equal(pass.checked, 9, 'unreachable sources are not counted as checked');
+  assert.equal(pass.verifiedRate, 0.778);
   assert.equal(pass.supportedRate, 1);
-  assert.equal(score(['verified', 'unreachable', 'unreachable', 'verified']).release, 'blocked', 'too few reachable sources to judge');
-  const bad = score(['verified', 'contradicted', 'garbled', 'verified']);
+  assert.equal(score([...Array(6).fill('verified'), 'unreachable', 'unreachable', 'unreachable', 'unreachable']).release, 'blocked', 'too few reachable sources to judge');
+  const bad = score([...Array(8).fill('verified'), 'contradicted', 'garbled']);
   assert.equal(bad.release, 'blocked');
-  assert.equal(bad.blocks.length, 2);
+  assert.equal(bad.blocks.length, 1, 'contradicted; 2/10 failed is at, not over, the 20% limit; 80% verified');
+});
+
+test('release needs a verified rate of at least 70%: 6 of 10 blocks, 7 of 10 passes, partials do not count', () => {
+  const ten = tableReport(10);
+  const sample = sampleOf(ten);
+  const score = (verified, partial) => scoreOf(sample.map((r, i) => ({
+    ...r, ...EVIDENCE, status: i < verified ? 'verified' : i < verified + partial ? 'partial' : 'unsupported',
+  })), ten);
+  const six = score(6, 4);
+  assert.equal(six.release, 'blocked');
+  assert.deepEqual(six.blocks, ['verified rate 60% is below the 70% minimum (partial claims carry details the cited page does not state)']);
+  assert.equal(six.supportedRate, 1, 'partials still count as supported for the 20% failure limit');
+  const seven = score(7, 3);
+  assert.equal(seven.release, 'pass', seven.blocks.join('; '));
+  const partialHeavy = score(2, 8);
+  assert.equal(partialHeavy.release, 'blocked');
+  assert.match(partialHeavy.blocks.join(' '), /verified rate 20% is below the 70% minimum/);
+  assert.equal(score(8, 0).release, 'pass', '8 verified and 2 unsupported: at the 20% failure limit, 80% verified');
 });
 
 test('pipelineHealth fails on quarantine leaks and warns on twins, stale listings, stalled runs and a full window', () => {
