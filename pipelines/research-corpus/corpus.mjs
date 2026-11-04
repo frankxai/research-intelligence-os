@@ -252,9 +252,7 @@ function listCorpusFiles(dir) {
   });
 }
 
-function localSearch(query) {
-  const wanted = flag('domain');
-  const scope = flag('scope');
+function buildPassages({ wanted, scope } = {}) {
   const triage = readTriage();
   const passages = [];
   for (const file of listCorpusFiles(P.corpus)) {
@@ -267,11 +265,36 @@ function localSearch(query) {
     const { meta, chunks } = chunkMarkdown(readFileSync(file, 'utf8'));
     for (const c of chunks) passages.push({ ...c, key: rel, evidence: meta.evidence ?? 'n/a', verification: meta.verification ?? '?' });
   }
+  return passages;
+}
+
+function localSearch(query) {
+  const passages = buildPassages({ wanted: flag('domain'), scope: flag('scope') });
   const hits = bm25Rank(passages, query, { limit: Number(flag('limit') || 8) });
-  for (const h of hits) console.log(`
-[${h.score}] ${h.key} > ${h.heading} (${h.evidence}, ${h.verification})
-${h.text.slice(0, 600)}`);
+  for (const h of hits) console.log(`${String.fromCharCode(10)}[${h.score}] ${h.key} > ${h.heading} (${h.evidence}, ${h.verification})${String.fromCharCode(10)}${h.text.slice(0, 600)}`);
   if (!hits.length) console.log(`no local passages (${passages.length} indexed)`);
+}
+
+// Retrieval evaluation: questions live in ~/.starlight/research/eval/questions.json as
+// [{ "q": "...", "expect": ["substring of the right document key"] }]. Reports hit@1, hit@5 and
+// MRR for the local BM25 baseline; any vector or hybrid index must beat these on the same file.
+function cmdEval() {
+  const file = flag('file') || path.join(HOME, 'eval', 'questions.json');
+  const questions = readJson(file, null) || die(`no questions at ${file}`);
+  const passages = buildPassages({ scope: flag('scope') });
+  let h1 = 0; let h5 = 0; let rr = 0;
+  const misses = [];
+  for (const { q, expect } of questions) {
+    const ranked = bm25Rank(passages, q, { limit: 50 });
+    const keys = [];
+    for (const p of ranked) if (!keys.includes(p.key)) keys.push(p.key);
+    const pos = keys.findIndex((k) => expect.some((e) => k.includes(e)));
+    if (pos === 0) h1 += 1;
+    if (pos >= 0 && pos < 5) h5 += 1;
+    if (pos >= 0) rr += 1 / (pos + 1); else misses.push(q);
+  }
+  const n = questions.length;
+  console.log(JSON.stringify({ questions: n, passages: passages.length, hitAt1: +(h1 / n).toFixed(3), hitAt5: +(h5 / n).toFixed(3), mrr: +(rr / n).toFixed(3), misses }, null, 2));
 }
 
 function cmdAudit() {
@@ -433,7 +456,7 @@ function cmdUsage() {
 
 const commands = {
   list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, sync: cmdSync, status: cmdStatus,
-  search: cmdSearch, triage: cmdTriage, audit: cmdAudit, prune: cmdPrune, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
+  search: cmdSearch, triage: cmdTriage, eval: cmdEval, audit: cmdAudit, prune: cmdPrune, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
 };
 const cmd = commands[process.argv[2]];
 if (!cmd) die(`commands: ${Object.keys(commands).join(', ')}`, 2);
