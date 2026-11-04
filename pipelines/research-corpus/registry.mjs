@@ -21,12 +21,14 @@
 // RESEARCH_HOME/registry/. The release verdict is the claim gate's own (`corpus.mjs verify score`); the rank
 // only orders review.
 
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { evidenceStats, extractClaims, normalizeEol, scoreClaims, usagePlan } from './lib.mjs';
+import {
+  DEFAULT_PERSONAL_PATTERNS, classifyKind, evidenceStats, extractClaims, normalizeEol, scoreClaims, usagePlan,
+} from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DAY_MS = 86_400_000;
@@ -122,6 +124,16 @@ export const PRIVATE_COLUMNS = [
 export const SHARE_ROLE_COLUMNS = ['row_id', 'domain', 'kind', 'evidence', 'release', ...Object.keys(ROLES), 'human_reader', 'agent_reader'];
 export const PRIVATE_ROLE_COLUMNS = ['row_id', 'key', 'title', 'domain', 'kind', 'evidence', 'release', ...Object.keys(ROLES), 'human_reader', 'agent_reader'];
 
+// The public schema of the shareable tier, defined here and nowhere else: private configuration (domains.local.json,
+// weights.local.json) can never add a word to it. Domain ids mirror the public domains.json (a test keeps the two
+// in step); any other id, including every private one, is written as 'other'.
+export const PUBLIC_DOMAIN_IDS = Object.freeze([
+  'agentic-income-streams', 'ai-models-platforms', 'github-ecosystem', 'digital-product-design', 'web-design', 'marketing',
+  'community', 'solana', 'ethereum', 'bitcoin', 'web3-general', 'publishing-books', 'music-media', 'human-potential',
+  'business-strategy', 'unrouted',
+]);
+const PUBLIC_DOMAINS = new Set(PUBLIC_DOMAIN_IDS.filter((d) => /^[a-z0-9-]+$/.test(d)));
+
 // The values a shareable enumerated field may take; anything else is written as 'other'.
 const OTHER = 'other';
 const ENUMS = {
@@ -171,7 +183,8 @@ const TEXT = {
   notePrivate: '> **Private: do not share.** This tier holds titles, corpus keys, file paths and Drive links. Names are redacted against the private name list on a best-effort basis only: look-alike letters from another script, and a name glued to the next word by an invisible character, are not caught. Share `registry/shareable/` instead.',
   noteShare: '> **Shareable.** This tier holds no titles, file paths, corpus keys, Drive ids or links, and no text taken from a report or a ledger title. Each report is an opaque id (the first 12 hex digits of the SHA-256 of its corpus key) with enumerated, numeric and date fields only. Before writing, every character was checked to be printable ASCII and every word to be in the registry vocabulary; anything else stops the build.',
   hypotheses: '> **Weights are hypotheses.** The rank score only orders what to review next; it never releases a report. Release comes only from the claim gate (`node corpus.mjs verify score <key>`): `pass` or `blocked`. A pass covers only the sampled claims a checker supported, never the whole report. A report with no claim records is `unsampled`, and its rank is `unranked`.',
-  built: 'Built {at} from {n} corpus reports; {w} excluded, withheld (excluded by Drive id, quarantine or a private exclusion pattern: no row in either tier). reports.csv and reports.jsonl hold every column of this tier; roles.csv holds the role relevance matrix; all three share `row_id`.',
+  built: 'Built {at} from {n} corpus reports; {w} excluded, withheld (excluded by Drive id, quarantine or the pipeline exclusion rules: no row, ledger run, cost or claim diagnostic in either tier). reports.csv and reports.jsonl hold every column of this tier; roles.csv holds the role relevance matrix; all three share `row_id`, a pseudonym keyed by a private salt.',
+  aFew: 'a few',
   paths: 'Paths are relative to RESEARCH_HOME.',
   checkedPrivate: 'Name check: every private output was scanned against {d} hashed name phrase(s) and {p} private exclusion pattern(s) before writing; a hit stops the build. Matches show as [redacted].',
   uncheckedPrivate: '**Not checked for personal names:** built with --allow-unredacted and no redaction list.',
@@ -202,8 +215,9 @@ const TEXT = {
     breadth: 'min(1, distinct cited hosts / {h})',
     freshness: 'full inside the domain refresh window (staleDays, default {d}), then linear to 0 over {w} more windows',
     coverage: 'min(1, checked claims / claims in report across all extraction modes); blank when unsampled',
-    economic: 'domain weight * max; set only by the table below, never by keywords',
+    economic: 'domain weight * max; the per-domain weights are configuration, never keywords',
   },
+  econPrivateOnly: 'The per-domain economic weights are private configuration and are listed only in the private tier.',
 };
 
 const PROBLEMS = {
@@ -216,7 +230,7 @@ const PROBLEMS = {
   orphanCloses: 'usage-ledger done/abandon record(s) name a title that matches no run (a typo leaves the real run open)',
   unmatchedRuns: 'finished usage-ledger run(s) match no corpus report (not exported yet, or the title changed)',
   computedEvidence: 'report(s) lack evidence fields in front matter; the registry computed them from the body',
-  withheld: 'excluded document(s) are still in the corpus (Drive id, quarantine or private exclusion pattern); they are withheld from both tiers',
+  withheld: 'excluded document(s) are still in the corpus (Drive id, quarantine or the pipeline exclusion rules); they are withheld from both tiers',
   backupDiffers: 'claims file(s) differ from their checked backup',
   backupOnly: 'checked backup(s) have no primary claims file; the gate reads only the primary, so those reports show as unsampled',
   orphanClaims: 'claims file(s) name no report in the corpus',
@@ -359,11 +373,11 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?Z)?$/;
 const enumOf = (field, v) => (v === null || v === undefined ? null : ENUMS[field].includes(v) ? v : OTHER);
 const dateOf = (v) => (typeof v === 'string' && ISO_RE.test(v) ? v : null);
 const numOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-const domainOf = (v, known) => (v === null || v === undefined ? null : known.has(v) ? v : OTHER);
+const domainOf = (v) => (v === null || v === undefined ? null : PUBLIC_DOMAINS.has(v) ? v : OTHER);
 const OPAQUE_ID_RE = /^[0-9a-f]{12}$/;
 
-export function shareRow(row, knownDomains) {
-  const out = { row_id: OPAQUE_ID_RE.test(row.row_id) ? row.row_id : null, domain: domainOf(row.domain, knownDomains), ledger_domain: domainOf(row.ledger_domain, knownDomains) };
+export function shareRow(row) {
+  const out = { row_id: OPAQUE_ID_RE.test(row.row_id) ? row.row_id : null, domain: domainOf(row.domain), ledger_domain: domainOf(row.ledger_domain) };
   for (const f of Object.keys(ENUMS)) out[f] = enumOf(f, row[f]);
   for (const f of SHARE_DATES) out[f] = dateOf(row[f]);
   for (const f of SHARE_NUMBERS) out[f] = numOf(row[f]);
@@ -373,11 +387,11 @@ export function shareRow(row, knownDomains) {
   return Object.fromEntries(SHARE_COLUMNS.map((c) => [c, out[c] ?? null]));
 }
 
-// The words the shareable tier may contain: its fixed text, column names, enum values, role ids, reader phrases and
-// configured domain ids (including those in the weights files, which are configuration, not report text). Numbers,
-// ISO date pieces and opaque ids are allowed by shape; JSON's null is allowed for empty fields.
-export function shareVocabulary(knownDomains, configuredIds = []) {
-  const sources = [TEXT, PROBLEMS, READERS, ENUMS, SHARE_COLUMNS, SHARE_ROLE_COLUMNS, Object.keys(ROLES), [...knownDomains], [...configuredIds],
+// The words the shareable tier may contain, all defined in this file: its fixed text, column names, enum values,
+// role ids, reader phrases and the public domain ids. Nothing from private configuration or the corpus is added.
+// Numbers, ISO date pieces and opaque ids are allowed by shape; JSON's null is allowed for empty fields.
+export function shareVocabulary() {
+  const sources = [TEXT, PROBLEMS, READERS, ENUMS, SHARE_COLUMNS, SHARE_ROLE_COLUMNS, Object.keys(ROLES), PUBLIC_DOMAIN_IDS,
     [OTHER, 'unranked', 'yes', 'no', 'null']];
   return new Set(JSON.stringify(sources).toLowerCase().match(/[a-z0-9]+/g));
 }
@@ -426,8 +440,8 @@ export function ledgerRuns(ledger) {
     return { title: run.title, domain: run.domain ?? null, started: run.ts, finished: status === 'done' ? end.ts : null, status };
   });
   const titles = new Set(runs.map((r) => r.title));
-  const orphanCloses = rows.filter((r) => (r.type === 'done' || r.type === 'abandoned') && !titles.has(r.title)).length;
-  return { runs, orphanCloses };
+  const orphanCloseTitles = rows.filter((r) => (r.type === 'done' || r.type === 'abandoned') && !titles.has(r.title)).map((r) => r.title);
+  return { runs, orphanCloses: orphanCloseTitles.length, orphanCloseTitles };
 }
 
 // A report is exported up to this long after its run is marked done.
@@ -435,21 +449,55 @@ const RUN_MATCH_GRACE_MS = 2 * HOUR_MS;
 const OPEN_RUN_SPAN_MS = 6 * HOUR_MS;
 const MIN_TITLE_WORDS = 3;
 
-// A run matches a report when one title contains the other as whole words and the report was created
-// between the run's start and its end plus the grace. An abandoned run produced no report by definition.
+// One title contains the other as whole words, and the report title is long enough to mean something.
+function titlesOverlap(reportTitle, runTitle) {
+  const t = phraseOf(reportTitle);
+  const r = phraseOf(runTitle);
+  return t.split(' ').length >= MIN_TITLE_WORDS && (` ${r} `.includes(` ${t} `) || ` ${t} `.includes(` ${r} `));
+}
+
+// The report was created between the run's start and its end (or the open-run span) plus the grace.
+function inRunWindow(created, run) {
+  const start = Date.parse(run.started);
+  const end = run.finished ? Date.parse(run.finished) : start + OPEN_RUN_SPAN_MS;
+  return created >= start && created <= end + RUN_MATCH_GRACE_MS;
+}
+
+// A run matches a report when their titles overlap and the report was created in the run's window. An abandoned
+// run produced no report by definition.
 export function matchRun(report, runs) {
-  const t = phraseOf(report.title);
   const created = Date.parse(report.created);
-  if (t.split(' ').length < MIN_TITLE_WORDS || Number.isNaN(created)) return null;
-  const hits = runs.filter((run) => {
-    const r = phraseOf(run.title);
-    if (run.status === 'abandoned' || !(` ${r} `.includes(` ${t} `) || ` ${t} `.includes(` ${r} `))) return false;
-    const start = Date.parse(run.started);
-    const end = run.finished ? Date.parse(run.finished) : start + OPEN_RUN_SPAN_MS;
-    return created >= start && created <= end + RUN_MATCH_GRACE_MS;
-  });
+  if (Number.isNaN(created)) return null;
+  const hits = runs.filter((run) => run.status !== 'abandoned' && titlesOverlap(report.title, run.title) && inRunWindow(created, run));
   const endOf = (run) => Date.parse(run.finished ?? run.started);
   return hits.sort((a, b) => Math.abs(created - endOf(a)) - Math.abs(created - endOf(b)))[0] ?? null;
+}
+
+// Runs that belong to excluded reports, in any status: every run whose title overlaps an excluded report's, and every
+// run in the excluded report's domain whose window holds its creation time, unless that run's title matches a kept
+// report. They are dropped before any ledger table, count or cost average is computed.
+export function excludedRuns(runs, excluded, kept) {
+  const keptRuns = new Set(kept.map((f) => matchRun(f, runs)).filter(Boolean));
+  const dropped = new Set();
+  for (const f of excluded) {
+    const created = Date.parse(f.created);
+    for (const run of runs) {
+      const byTitle = titlesOverlap(f.title, run.title);
+      const byDomainTime = !keptRuns.has(run) && run.domain === f.domain && !Number.isNaN(created) && inRunWindow(created, run);
+      if (byTitle || byDomainTime) dropped.add(run);
+    }
+  }
+  return dropped;
+}
+
+// The usage plan over the kept runs only. Costs are measured on the whole ledger, so an excluded run still makes an
+// overlapping kept run unmeasurable rather than inflating its cost; the excluded runs' own costs are then dropped.
+function keptPlan(ledger, dropped) {
+  const full = usagePlan(ledger);
+  const isDropped = (c) => [...dropped].some((r) => r.title === c.title && r.domain === (c.domain ?? null));
+  const costs = full.costs.filter((c) => !isDropped(c));
+  const mean = (k) => (costs.length ? costs.reduce((s, c) => s + c[k], 0) / costs.length : null);
+  return { measuredRuns: costs.length, costs, sessionPerRun: mean('session'), weeklyPerRun: mean('weekly') };
 }
 
 // Line endings are normalized first, as the verifier does, so a file saved with CRLF or lone CR keeps its
@@ -477,7 +525,7 @@ function ledgerColumns(run, { ledgerPresent, costs, runs }) {
   if (!run) return { ...base, cost_basis: 'no-ledger-run' };
   const cols = { ...base, run_started: run.started, run_finished: run.finished, ledger_run_status: run.status, ledger_domain: run.domain };
   const twins = runs.filter((r) => r.title === run.title && r.domain === run.domain).length;
-  const cost = costs.find((c) => c.title === run.title && c.domain === run.domain);
+  const cost = costs.find((c) => c.title === run.title && (c.domain ?? null) === run.domain);
   if (twins > 1) return { ...cols, cost_basis: 'ambiguous-repeated-title' };
   if (!cost) return { ...cols, cost_basis: 'not-measured' };
   return { ...cols, cost_basis: 'measured', window_pct_cost: cost.session, weekly_pct_cost: cost.weekly };
@@ -562,16 +610,31 @@ function headingsOf(body) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The registry: pure, so every rule above is testable on synthetic data. Excluded documents are dropped before
-// any row exists, so neither tier can carry them.
-function isWithheld(f, key, { quarantineKeys, redact }) {
-  return f.excludedId || quarantineKeys.has(key) || redact(`${f.title}\n${key}`).hits.has('exclusion');
+// The registry: pure, so every rule above is testable on synthetic data. Exclusion is decided first, over every
+// report, and excluded documents are dropped before any row, ledger run, cost average, count or claim diagnostic
+// is computed, so neither tier can carry them.
+
+// The pipeline's own exclusion test (lib.mjs classifyKind): a title containing a personal pattern (the defaults
+// plus exclude.txt, as a case-insensitive substring) is 'personal'; one matching SENSITIVE_RE is 'sensitive'.
+export function pipelineExcludes(title, personalPatterns = DEFAULT_PERSONAL_PATTERNS) {
+  return ['personal', 'sensitive'].includes(classifyKind({ title: String(title ?? '') }, personalPatterns));
 }
+
+// Excluded: a listed Drive id, a quarantined key, the pipeline's own test, or (stricter than the pipeline) an
+// exclusion pattern matching whole words once separators, case and Unicode forms are normalized.
+function isExcluded({ key, f }, { quarantineKeys, personalPatterns, redact }) {
+  return f.excludedId || quarantineKeys.has(key) || pipelineExcludes(f.title, personalPatterns)
+    || redact(`${f.title}\n${key}`).hits.has('exclusion');
+}
+
+// Row ids are a pseudonym keyed by a private salt, so a reader who can guess a corpus key cannot confirm it.
+export const rowIdFor = (key, salt) => createHmac('sha256', String(salt)).update(String(key)).digest('hex').slice(0, 12);
+const freshSalt = () => randomBytes(32).toString('hex');
 
 function reportRow(f, key, text, run, ctx) {
   const created = Date.parse(f.created);
   const raw = {
-    row_id: sha256(key).slice(0, 12), key, title: f.title, domain: f.domain, kind: f.kind, source: f.source,
+    row_id: rowIdFor(key, ctx.idSalt), key, title: f.title, domain: f.domain, kind: f.kind, source: f.source,
     created: f.created, age_days: Number.isNaN(created) ? null : Math.max(0, Math.floor((ctx.now - created) / DAY_MS)),
     producer: f.producer ?? (run ? 'gemini-deep-research' : 'unknown'),
     producer_mode: f.mode ?? (run ? 'deep-research' : 'unknown'), producer_model: f.model ?? 'unknown',
@@ -588,31 +651,31 @@ function reportRow(f, key, text, run, ctx) {
 
 export function buildRegistry({
   reports, ledger = null, claimSets = new Map(), domains = [], local = {}, exclusionIds = new Set(), quarantineKeys = new Set(),
-  redact = makeRedactor(), now = Date.now(), orphanClaimFiles = [],
+  personalPatterns = DEFAULT_PERSONAL_PATTERNS, redact = makeRedactor(), now = Date.now(), orphanClaimFiles = [], idSalt = freshSalt(),
 }) {
   const stale = new Map();
   for (const d of domains) if (!stale.has(d.id)) stale.set(d.id, d.staleDays);
-  const knownDomains = new Set([...stale.keys(), 'unrouted']);
   const econ = { ...ECONOMIC_DOMAIN_WEIGHTS, ...(local.economicDomainWeights ?? {}) };
-  const { runs, orphanCloses } = ledger ? ledgerRuns(ledger) : { runs: [], orphanCloses: 0 };
-  const plan = ledger ? usagePlan(ledger) : null;
-  const ctx = { ledgerPresent: Boolean(ledger), costs: plan?.costs ?? [], runs, now, stale, econ, claimSets };
+  const all = [...reports].sort((a, b) => a.key.localeCompare(b.key)).map(({ key, text }) => ({ key, text, f: reportFacts(key, text, exclusionIds) }));
+  const excluded = all.filter((r) => isExcluded(r, { quarantineKeys, personalPatterns, redact }));
+  const kept = all.filter((r) => !excluded.includes(r));
+  const ledgerFacts = ledger ? ledgerRuns(ledger) : { runs: [], orphanCloseTitles: [] };
+  const dropped = excludedRuns(ledgerFacts.runs, excluded.map((r) => r.f), kept.map((r) => r.f));
+  const runs = ledgerFacts.runs.filter((r) => !dropped.has(r));
+  const orphanCloses = ledgerFacts.orphanCloseTitles.filter((t) => !excluded.some((r) => titlesOverlap(r.f.title, t))).length;
+  const plan = ledger ? keptPlan(ledger, dropped) : null;
+  const keptKeys = new Set(kept.map((r) => r.key));
+  const keptSets = new Map([...claimSets].filter(([k]) => keptKeys.has(k)));
+  const ctx = { ledgerPresent: Boolean(ledger), costs: plan?.costs ?? [], runs, now, stale, econ, claimSets: keptSets, idSalt };
   const out = { rows: [], roleRows: [], shareRows: [], shareRoleRows: [] };
   const matched = new Map();
-  let withheld = 0;
-  for (const { key, text } of [...reports].sort((a, b) => a.key.localeCompare(b.key))) {
-    const f = reportFacts(key, text, exclusionIds);
+  for (const { key, text, f } of kept) {
     const run = matchRun(f, runs);
-    if (isWithheld(f, key, { quarantineKeys, redact })) {
-      withheld += 1;
-      if (run) matched.set(run, null);
-      continue;
-    }
     const raw = reportRow(f, key, text, run, ctx);
     if (run) matched.set(run, raw);
     const relevance = roleRelevance(f.domain, { title: f.title, headings: headingsOf(f.body) }, local.roleDomains);
     const [human, agent] = readers(raw);
-    const share = shareRow(raw, knownDomains);
+    const share = shareRow(raw);
     out.shareRows.push(share);
     out.shareRoleRows.push({ row_id: share.row_id, domain: share.domain, kind: share.kind, evidence: share.evidence, release: share.release,
       ...relevance, human_reader: human, agent_reader: agent });
@@ -622,13 +685,22 @@ export function buildRegistry({
     out.roleRows.push({ row_id: row.row_id, key: row.key, title: row.title, domain: row.domain, kind: row.kind,
       evidence: row.evidence, release: row.release, ...relevance, human_reader: human, agent_reader: agent });
   }
-  const reportOf = (r, idOf) => (!matched.has(r) ? null : matched.get(r) === null ? TEXT.withheld : idOf(matched.get(r)));
+  const reportOf = (r, idOf) => (matched.has(r) ? idOf(matched.get(r)) : null);
   const runRows = runs.map((r) => ({ ...r, title: redact(r.title).text, report: reportOf(r, (raw) => redact(raw.key, 'redacted').text) }));
-  const shareRuns = runs.map((r) => ({ title: null, domain: domainOf(r.domain, knownDomains), status: enumOf('ledger_run_status', r.status),
+  const shareRuns = runs.map((r) => ({ domain: domainOf(r.domain), status: enumOf('ledger_run_status', r.status),
     started: dateOf(r.started), finished: dateOf(r.finished), report: reportOf(r, (raw) => raw.row_id) }));
-  const problems = findProblems({ rows: out.rows, runRows, orphanCloses, claimSets, orphanClaimFiles, econ, withheld, ledgerPresent: Boolean(ledger) });
-  return { ...out, runRows, shareRuns, plan, problems, econ, withheld, knownDomains };
+  // A claims file left by an excluded or quarantined report is not reported as an orphan either.
+  const excludedStems = new Set([...excluded.map((r) => r.key), ...quarantineKeys].map(stemOf));
+  const orphans = orphanClaimFiles.filter((name) => !excludedStems.has(name.replace(/\.claims\.jsonl$/, '')));
+  const problems = findProblems({ rows: out.rows, runRows, orphanCloses, claimSets: keptSets, orphanClaimFiles: orphans, econ,
+    withheld: excluded.length, ledgerPresent: Boolean(ledger) });
+  return { ...out, runRows, shareRuns, plan, problems, econ, withheld: excluded.length };
 }
+
+// Problems are counts with fixed text. The withheld count is the one that can point at a document, so the
+// shareable tier shows it as "a few" when it is 1 to 3.
+const SMALL_COUNT = 3;
+const countLabel = (n, shareable) => (shareable && n > 0 && n <= SMALL_COUNT ? TEXT.aFew : String(n));
 
 function findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles, econ, withheld, ledgerPresent }) {
   const count = (pred) => rows.filter(pred).length;
@@ -650,8 +722,10 @@ function findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles
     [count((r) => r.release !== 'unsampled' && !(econ[r.domain] > 0)), PROBLEMS.noEconWeight],
     [ledgerPresent ? 0 : 1, PROBLEMS.noLedger],
   ];
-  return checks.filter(([n]) => n > 0).map(([n, text]) => `${n} ${text}.`);
+  return checks.filter(([n]) => n > 0).map(([n, text]) => ({ n, text }));
 }
+
+const problemLines = (problems, shareable) => problems.map(({ n, text }) => `${text === PROBLEMS.withheld ? countLabel(n, shareable) : n} ${text}.`);
 
 // ---------------------------------------------------------------------------------------------
 // Rendering.
@@ -687,12 +761,14 @@ function summaryLines(rows, runRows, withheld, shareable) {
     [S.sampled, n((r) => r.release !== 'unsampled')],
     [S.release, `${n((r) => r.release === 'pass')} / ${n((r) => r.release === 'blocked')} / ${n((r) => r.release === 'unsampled')}`],
     [S.ledger, `${runRows.length} / ${n((r) => r.ledger_run_status)} / ${n((r) => r.cost_basis === 'measured')}`],
-    [S.withheld, withheld],
+    [S.withheld, countLabel(withheld, shareable)],
     ...(shareable ? [] : [[S.redacted, n((r) => r.privacy === 'redacted')]]),
   ]);
 }
 
-function weightLines(econ, localKeys) {
+// The shareable tier shows the generic components and rules only; the per-domain weights (whose keys and values may
+// come from private configuration) are listed in the private tier alone.
+function weightLines(econ, localKeys, shareable) {
   const domainList = Object.entries(econ).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([d, w]) => `${d} ${w}${localKeys.has(d) ? ` ${TEXT.local}` : ''}`).join('; ');
   const C = TEXT.component;
@@ -705,7 +781,7 @@ function weightLines(econ, localKeys) {
       [C.coverage, WEIGHTS.verificationCoverage, R.coverage],
       [C.economic, WEIGHTS.economicRelevance, R.economic],
     ]),
-    '', fmt(TEXT.econ, { list: domainList }),
+    '', shareable ? TEXT.econPrivateOnly : fmt(TEXT.econ, { list: domainList }),
   ];
 }
 
@@ -732,10 +808,10 @@ export function registryMarkdown({ tier, rows, roleRows, runRows, plan, problems
   const all = [...rows].sort((a, b) => (order[a.release] ?? 3) - (order[b.release] ?? 3) || byId(a, b));
   return [
     shareable ? TEXT.headShare : TEXT.headPrivate, '', shareable ? TEXT.noteShare : TEXT.notePrivate, '', TEXT.hypotheses, '',
-    `${fmt(TEXT.built, { at: builtAt, n: rows.length, w: withheld })}${shareable ? '' : ` ${TEXT.paths}`}`, '',
+    `${fmt(TEXT.built, { at: builtAt, n: rows.length, w: countLabel(withheld, shareable) })}${shareable ? '' : ` ${TEXT.paths}`}`, '',
     nameCheck, '',
     TEXT.hSummary, '', ...summaryLines(rows, runRows, withheld, shareable), '',
-    TEXT.hWeights, '', ...weightLines(econ, localKeys), '',
+    TEXT.hWeights, '', ...weightLines(econ, localKeys, shareable), '',
     TEXT.hRanked, '',
     ...mdTable([H.rank, H.report, H.domain, H.release, H.vci, H.share, H.integrity, H.breadth, H.fresh, H.coverage, H.econ, H.blocks],
       ranked.map((r) => [r.rank_score, id(r), r.domain, r.release, `${r.claims_verified ?? 0} / ${r.claims_checked ?? 0} / ${r.claims_in_report ?? TEXT.na}`,
@@ -745,7 +821,7 @@ export function registryMarkdown({ tier, rows, roleRows, runRows, plan, problems
     ...mdTable([H.report, H.domain, H.kind, H.hosts, H.breadth, H.fresh, H.econ],
       queue.map((r) => [id(r), r.domain, r.kind, r.source_hosts, r.score_source_breadth, r.score_freshness, r.score_economic_relevance])), '',
     TEXT.hLedger, '', ...ledgerLines(runRows, plan, ledgerPresent, shareable), '',
-    TEXT.hProblems, '', ...(problems.length ? problems.map((p) => `- ${p}`) : [TEXT.none]), '',
+    TEXT.hProblems, '', ...(problems.length ? problemLines(problems, shareable).map((p) => `- ${p}`) : [TEXT.none]), '',
     TEXT.hRoles, '', ...mdTable([H.role, H.rel2, H.rel3], roleCounts), '',
     TEXT.hAll, '',
     ...mdTable([H.report, H.kind, H.domain, H.evidence, H.release, H.rank], all.map((r) => [id(r), r.kind, r.domain, r.evidence, r.release, r.rank_score])), '',
@@ -818,17 +894,50 @@ export function loadHome(home) {
     ? readdirSync(verifyDir).filter((f) => f.endsWith('.claims.jsonl') && !stems.has(f.replace(/\.claims\.jsonl$/, ''))) : [];
   const usage = path.join(home, 'gemini-usage.jsonl');
   const redactFile = path.join(home, 'registry', 'redact.sha256.txt');
+  const weightsFile = path.join(home, 'registry', 'weights.local.json');
+  const exclusionPhrases = readLines(path.join(home, 'exclude.txt'));
   return {
-    reports, claimSets, orphanClaimFiles,
+    reports, claimSets, orphanClaimFiles, exclusionPhrases,
     ledger: existsSync(usage) ? readJsonl(usage) : null,
     domains: [...readJson(path.join(home, 'domains.local.json'), { domains: [] }).domains, ...readJson(path.join(HERE, 'domains.json'), { domains: [] }).domains],
-    local: readJson(path.join(home, 'registry', 'weights.local.json'), {}),
+    local: validateLocalWeights(readJson(weightsFile, {}), weightsFile),
     exclusionIds: new Set(readLines(path.join(home, 'exclude-ids.txt'))),
     quarantineKeys: new Set(keysUnder(path.join(home, 'quarantine'))),
-    exclusionPhrases: readLines(path.join(home, 'exclude.txt')),
+    // The same list corpus.mjs classifies with: the default personal patterns plus exclude.txt.
+    personalPatterns: [...DEFAULT_PERSONAL_PATTERNS, ...exclusionPhrases],
     denylist: existsSync(redactFile) ? parseRedactList(readFileSync(redactFile, 'utf8')) : null,
     redactFile,
   };
+}
+
+// Local weights are numbers only, so configuration cannot smuggle text into a score. The error names the file, not
+// the offending key or value.
+export function validateLocalWeights(local, file = 'weights.local.json') {
+  for (const w of Object.values(local.economicDomainWeights ?? {})) {
+    if (typeof w !== 'number' || !Number.isFinite(w) || w < 0 || w > 1) throw new Error(`${file}: every economic domain weight must be a number from 0 to 1`);
+  }
+  for (const bases of Object.values(local.roleDomains ?? {})) {
+    for (const b of Object.values(bases ?? {})) {
+      if (!Number.isInteger(b) || b < 0 || b > 2) throw new Error(`${file}: every role domain base must be 0, 1 or 2`);
+    }
+  }
+  return local;
+}
+
+// The row-id salt: 32 random bytes, created on the first build and kept in the private tier (owner-only where the
+// file system honours it). Ids are stable while it exists; deleting it re-keys every id.
+const SALT_FILE = '.id-salt';
+const SALT_RE = /^[0-9a-f]{64}$/;
+
+export function idSaltFor(home) {
+  const file = path.join(home, 'registry', 'private', SALT_FILE);
+  if (!existsSync(file)) {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, `${freshSalt()}\n`, { mode: 0o600, flag: 'wx' });
+  }
+  const salt = readFileSync(file, 'utf8').trim();
+  if (!SALT_RE.test(salt)) throw new Error(`${file} is not a 64-hex-digit salt; delete it to create a new one (every row id will change)`);
+  return salt;
 }
 
 function writeAtomic(file, text) {
@@ -838,9 +947,12 @@ function writeAtomic(file, text) {
   renameSync(tmp, file);
 }
 
-// Builds before this layout wrote the private files to registry/ itself; they are removed so no stale private
-// copy sits where people look for something to share.
-const LEGACY_OUTPUTS = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'];
+// Builds before this layout wrote the private files to registry/ itself, through `<name>.tmp`; both the files and
+// any temporary file an interrupted write left behind are removed, so no stale private copy sits where people look
+// for something to share. Leftover temporary files in the tier folders go too.
+const OUTPUT_NAMES = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'];
+const LEGACY_OUTPUTS = OUTPUT_NAMES.flatMap((n) => [n, `${n}.tmp`]);
+const STALE_TIER_TEMPS = ['private', 'shareable'].flatMap((t) => OUTPUT_NAMES.map((n) => `${t}/${n}.tmp`));
 
 function tierFiles(tier, { rows, roleRows, columns, roleColumns, markdown }) {
   return {
@@ -857,7 +969,7 @@ export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
     throw new Error(`no redaction list at ${input.redactFile}: the private tier could name people. Add hashes with "node registry.mjs redact-hash", or pass --allow-unredacted`);
   }
   const redact = makeRedactor({ entries: input.denylist ?? [], phrases: input.exclusionPhrases });
-  const reg = buildRegistry({ ...input, redact, now });
+  const reg = buildRegistry({ ...input, redact, now, idSalt: idSaltFor(home) });
   const common = { plan: reg.plan, problems: reg.problems, econ: reg.econ, builtAt: new Date(now).toISOString(), withheld: reg.withheld,
     ledgerPresent: Boolean(input.ledger), localKeys: new Set(Object.keys(input.local.economicDomainWeights ?? {})) };
   const privateCheck = input.denylist
@@ -868,7 +980,7 @@ export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
     ...tierFiles('private', { rows: reg.rows, roleRows: reg.roleRows, columns: PRIVATE_COLUMNS, roleColumns: PRIVATE_ROLE_COLUMNS,
       markdown: registryMarkdown({ ...common, tier: 'private', rows: reg.rows, roleRows: reg.roleRows, runRows: reg.runRows, nameCheck: privateCheck }) }),
   };
-  const vocabulary = shareVocabulary(reg.knownDomains, Object.keys(reg.econ));
+  const vocabulary = shareVocabulary();
   const refused = Object.entries(files).flatMap(([name, text]) => {
     const why = [];
     if (redact(text).hits.size) why.push('matches the redaction list');
@@ -882,7 +994,7 @@ export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
   if (refused.length) throw new Error(`share-check failed, nothing was written: ${refused.join('; ')}`);
   const dir = path.join(home, 'registry');
   for (const [name, text] of Object.entries(files)) writeAtomic(path.join(dir, ...name.split('/')), text);
-  for (const name of LEGACY_OUTPUTS) rmSync(path.join(dir, name), { force: true });
+  for (const name of [...LEGACY_OUTPUTS, ...STALE_TIER_TEMPS]) rmSync(path.join(dir, ...name.split('/')), { force: true });
   return { dir, files: Object.keys(files), reports: reg.rows.length, withheld: reg.withheld, problems: reg.problems };
 }
 

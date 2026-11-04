@@ -6,13 +6,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { drawSample } from './lib.mjs';
+import { DEFAULT_PERSONAL_PATTERNS, classifyKind, drawSample } from './lib.mjs';
 // A namespace import, so a helper missing from an older registry.mjs fails only the tests that use it.
 import * as registry from './registry.mjs';
 
 const {
-  ROLES, buildRegistry, ledgerRuns, makeRedactor, matchRun, parseJsonl, parseRedactList, phraseHash, phraseOf, readers, redactEntry,
-  roleRelevance, runBuild, shareVocabulary, shareableScan, toCsv,
+  PUBLIC_DOMAIN_IDS, ROLES, buildRegistry, ledgerRuns, makeRedactor, matchRun, parseJsonl, parseRedactList, phraseHash, phraseOf,
+  pipelineExcludes, readers, redactEntry, roleRelevance, rowIdFor, runBuild, shareVocabulary, shareableScan, toCsv,
 } = registry;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -21,7 +21,9 @@ const NOW = Date.parse('2026-11-04T22:00:00Z');
 // A placeholder phrase, not anyone's name: it stands in for a name on the redaction list.
 const PLACEHOLDER = 'Testperson Placeholder';
 const CITED = { evidence: 'cited', source_urls: 40, source_hosts: 30 };
-const opaqueId = (key) => createHash('sha256').update(key).digest('hex').slice(0, 12);
+const unsaltedId = (key) => createHash('sha256').update(key).digest('hex').slice(0, 12);
+const saltOf = (home) => readFileSync(path.join(home, 'registry', 'private', '.id-salt'), 'utf8').trim();
+const idIn = (home, key) => rowIdFor(key, saltOf(home));
 
 function report({ title, domain, kind = 'deep-research', created = '2026-11-04T16:45:00.000Z', id = 'docA', evidence = CITED, body = '# Overview\n\nText.\n' }) {
   const fields = {
@@ -223,7 +225,8 @@ test('a title matching a private exclusion pattern once separators are normalize
     runBuild({ home, now: NOW });
     assert.deepEqual(readRows(home).map((r) => r.key), [KEY]);
     assert.doesNotMatch(allOutputs(home), /testperson|2026-11-01-notes/i);
-    for (const tier of ['private', 'shareable']) assert.match(read(home, tier, 'REGISTRY.md'), /1 excluded, withheld/);
+    assert.match(read(home, 'private', 'REGISTRY.md'), /1 excluded, withheld/);
+    assert.match(read(home, 'shareable', 'REGISTRY.md'), /a few excluded, withheld/, 'a count of 1 to 3 could point at a document');
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -239,7 +242,8 @@ test('build fails closed without a redaction list and writes only under registry
     const allowed = cli(['build', '--allow-unredacted']);
     assert.equal(allowed.status, 0, allowed.stderr);
     const added = filesUnder(home).filter((f) => !before.includes(f));
-    assert.deepEqual(added.sort(), ['private', 'shareable'].flatMap((t) => TIER_FILES.map((n) => `registry/${t}/${n}`)).sort());
+    const expected = [...['private', 'shareable'].flatMap((t) => TIER_FILES.map((n) => `registry/${t}/${n}`)), 'registry/private/.id-salt'];
+    assert.deepEqual(added.sort(), expected.sort());
     assert.match(read(home, 'private', 'REGISTRY.md'), /Not checked for personal names/);
     for (const tier of ['private', 'shareable']) assert.match(read(home, tier, 'REGISTRY.md'), /Weights are hypotheses/);
   } finally { rmSync(home, { recursive: true, force: true }); }
@@ -389,7 +393,7 @@ test('review 6.1: the shareable tier carries no character, word, key or Drive id
     runBuild({ home, now: NOW });
     assert.equal(existsSync(path.join(home, 'registry', 'reports.csv')), false, 'a stale root-level private copy is removed');
     const ids = rowsOf(home, 'shareable').map((r) => r.row_id).sort();
-    assert.deepEqual(ids, [opaqueId(key), opaqueId(KEY)].sort(), 'the report is present, by opaque id only');
+    assert.deepEqual(ids, [idIn(home, key), idIn(home, KEY)].sort(), 'the report is present, by opaque id only');
     for (const name of TIER_FILES) {
       const text = read(home, 'shareable', name);
       assert.doesNotMatch(text, /[^\t\n\r\x20-\x7e]/, `${name} is printable ASCII`);
@@ -399,7 +403,7 @@ test('review 6.1: the shareable tier carries no character, word, key or Drive id
     assert.equal(rowsOf(home, 'private').find((r) => r.drive_doc_id === driveId).title, CONFIDENTIAL, 'the private tier keeps the title');
     assert.match(read(home, 'private', 'REGISTRY.md'), /PRIVATE: do not share/i);
   } finally { rmSync(home, { recursive: true, force: true }); }
-  const vocabulary = shareVocabulary(new Set(['marketing']));
+  const vocabulary = shareVocabulary();
   assert.deepEqual(shareableScan('| 3d12d62c8411 | marketing | pass | 2026-11-04T17:26:39.041Z |', vocabulary), { nonAscii: 0, unknownWords: 0, ok: true });
   assert.equal(shareableScan('| 3d12d62c8411 | Confidential dossier |', vocabulary).unknownWords, 2, 'free text is refused');
   assert.equal(shareableScan('café', vocabulary).nonAscii, 1);
@@ -421,12 +425,13 @@ test('review 6.2: documents excluded by Drive id, quarantine or exclusion patter
   try {
     runBuild({ home, now: NOW });
     for (const tier of ['private', 'shareable']) {
-      assert.deepEqual(rowsOf(home, tier).map((r) => r.row_id), [opaqueId(KEY)], `${tier} has only the kept report`);
+      assert.deepEqual(rowsOf(home, tier).map((r) => r.row_id), [idIn(home, KEY)], `${tier} has only the kept report`);
       const text = tierText(home, tier);
       assert.doesNotMatch(text, /alpha|bravo|charlie|secretclient|drive-id/i, tier);
-      for (const k of [byId, byQuarantine, byPattern]) assert.ok(!text.includes(opaqueId(k)), `${tier} names no withheld row id`);
-      assert.match(read(home, tier, 'REGISTRY.md'), /3 excluded, withheld/);
+      for (const k of [byId, byQuarantine, byPattern]) assert.ok(!text.includes(idIn(home, k)), `${tier} names no withheld row id`);
     }
+    assert.match(read(home, 'private', 'REGISTRY.md'), /3 excluded, withheld/);
+    assert.match(read(home, 'shareable', 'REGISTRY.md'), /a few excluded, withheld/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -461,5 +466,101 @@ test('review 6.4: a word count that is not a positive safe integer stops the bui
     writeFileSync(path.join(home, 'registry', 'redact.sha256.txt'), `${hash} ${'9'.repeat(400)}  # overflow\n`);
     assert.throws(() => runBuild({ home, now: NOW }), /positive whole word count/);
     assert.equal(existsSync(path.join(home, 'registry', 'shareable')), false, 'nothing is written');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Regressions from the cross-family review of 873a48b: public schema, excluded runs, pipeline parity, salted ids,
+// legacy temporary files.
+
+test('review 7.1: private configuration cannot put a domain id or weight key into the shareable tier', () => {
+  const urlDomain = 'https://drive.google.com/open?id=SECRETDOMAIN1';
+  const home = makeHome({ reports: { 'marketing/2026-11-01-private-domain-report.md': report({ title: 'Plain Market Study', domain: urlDomain }), [KEY]: STUDY } });
+  writeUnder(home, 'domains.local.json', JSON.stringify({ domains: [{ id: urlDomain, name: 'private', staleDays: 14, keywords: [] }] }));
+  writeUnder(home, 'registry/weights.local.json', JSON.stringify({ economicDomainWeights: { [urlDomain]: 0.5, unusedsecretweightkey: 0.9 } }));
+  try {
+    runBuild({ home, now: NOW });
+    assert.doesNotMatch(tierText(home, 'shareable'), /drive\.google|secretdomain1|open\?id|unusedsecretweightkey/i);
+    assert.deepEqual(rowsOf(home, 'shareable').map((r) => r.domain).sort(), ['agentic-income-streams', 'other']);
+    assert.match(read(home, 'private', 'REGISTRY.md'), /unusedsecretweightkey 0\.9/, 'the private tier still lists private weights');
+    writeUnder(home, 'registry/weights.local.json', JSON.stringify({ economicDomainWeights: { marketing: 'agent strategy report' } }));
+    assert.throws(() => runBuild({ home, now: NOW }), /must be a number from 0 to 1/, 'a weight cannot carry text');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+  for (const { id } of domains) assert.ok(PUBLIC_DOMAIN_IDS.includes(id), `public domains.json id ${id} is mirrored in the schema`);
+});
+
+test('review 7.2: an excluded report leaves no ledger run, cost, timestamp or claim diagnostic in either tier', () => {
+  const secretKey = 'marketing/2026-11-03-withheld-acquisition-plan.md';
+  const secretTitle = 'Zulu Acquisition Plan Memo';
+  const ledger = [
+    reading('2026-11-03T08:00:00.000Z', 0, 10),
+    { ts: '2026-11-03T08:01:11.000Z', type: 'run', domain: 'marketing', title: 'Unrelated Prompt Words Here' },
+    { ts: '2026-11-03T08:30:00.000Z', type: 'done', title: 'Unrelated Prompt Words Here' },
+    reading('2026-11-03T08:31:00.000Z', 11, 12),
+    reading('2026-11-03T09:13:00.000Z', 11, 12),
+    { ts: '2026-11-03T09:13:37.000Z', type: 'run', domain: 'marketing', title: secretTitle },
+    { ts: '2026-11-03T09:47:11.000Z', type: 'done', title: secretTitle },
+    reading('2026-11-03T09:48:00.000Z', 48, 19),
+    ...LEDGER,
+  ];
+  const home = makeHome({
+    reports: { [KEY]: STUDY, [secretKey]: report({ title: secretTitle, domain: 'marketing', id: 'excluded-drive-id', created: '2026-11-03T09:50:00.000Z' }) },
+    ledger, excludeIds: ['excluded-drive-id'], verify: { 'marketing__2026-11-03-withheld-acquisition-plan.claims.jsonl': 'not json\n' },
+  });
+  try {
+    runBuild({ home, now: NOW });
+    for (const tier of ['private', 'shareable']) {
+      const text = tierText(home, tier);
+      assert.doesNotMatch(text, /08:01:11|08:30:00|09:13:37|09:47:11|zulu|acquisition|unrelated prompt/i, `${tier}: no trace of either excluded run`);
+      assert.doesNotMatch(text, /could not be read/, `${tier}: no claim diagnostic from the excluded report`);
+      const md = read(home, tier, 'REGISTRY.md');
+      assert.match(md, /Measured runs: 1\. Mean cost per measured run: window 30%, weekly 3%/, `${tier}: averages over kept runs only`);
+      assert.match(md, /\| Usage-ledger runs \/ matched to a report \/ with a measured cost \| 1 \/ 1 \/ 1 \|/);
+    }
+    assert.match(read(home, 'shareable', 'REGISTRY.md'), /a few excluded, withheld/);
+    assert.match(read(home, 'private', 'REGISTRY.md'), /1 excluded, withheld/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review 7.3: the registry withholds every title the pipeline classifier excludes', () => {
+  const patterns = [...DEFAULT_PERSONAL_PATTERNS, 'secretclient'];
+  const titles = ['Secretclient2026 Research', 'Quarterly Journal Review Notes', 'Term Sheet Draft For Review', 'Plain Market Study'];
+  const reports = Object.fromEntries(titles.map((t, i) => [`marketing/2026-11-0${i + 1}-doc-${i}.md`, report({ title: t, domain: 'marketing', id: `doc-${i}` })]));
+  const home = makeHome({ reports, exclude: ['secretclient'], denylist: [] });
+  try {
+    runBuild({ home, now: NOW });
+    assert.deepEqual(readRows(home).map((r) => r.title), ['Plain Market Study']);
+    assert.doesNotMatch(allOutputs(home), /secretclient|journal|term sheet/i);
+    assert.match(read(home, 'private', 'REGISTRY.md'), /3 excluded, withheld/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+  for (const t of titles) assert.equal(pipelineExcludes(t, patterns), ['personal', 'sensitive'].includes(classifyKind({ title: t }, patterns)), t);
+});
+
+test('review 7.4: row ids are keyed by a private salt, stable across builds, and not a hash anyone can recompute', () => {
+  const key = 'marketing/2026-11-04-acme-acquisition-research.md';
+  const home = makeHome({ reports: { [key]: report({ title: 'Acme Acquisition Research', domain: 'marketing' }) } });
+  try {
+    runBuild({ home, now: NOW });
+    const [first] = rowsOf(home, 'shareable');
+    assert.notEqual(first.row_id, unsaltedId(key), 'a guessed key cannot be confirmed by hashing it');
+    assert.notEqual(first.row_id, 'c2ade8ad4ea2', 'the reviewer\'s guess no longer matches');
+    runBuild({ home, now: NOW });
+    assert.equal(rowsOf(home, 'shareable')[0].row_id, first.row_id, 'stable across rebuilds');
+    assert.notEqual(rowIdFor(key, 'a'.repeat(64)), rowIdFor(key, 'b'.repeat(64)), 'different salts give different ids');
+    assert.equal(first.row_id, idIn(home, key));
+    assert.ok(!tierText(home, 'shareable').includes(saltOf(home)), 'the salt never reaches the shareable tier');
+    assert.deepEqual(readdirSync(path.join(home, 'registry', 'shareable')).sort(), [...TIER_FILES].sort());
+    writeFileSync(path.join(home, 'registry', 'private', '.id-salt'), 'not a salt\n');
+    assert.throws(() => runBuild({ home, now: NOW }), /64-hex-digit salt/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review 7.5: migration removes legacy outputs and the temporary files an interrupted write left behind', () => {
+  const home = makeHome({ reports: { [KEY]: STUDY } });
+  const stale = ['reports.csv', 'reports.jsonl.tmp', 'reports.csv.tmp', 'roles.csv.tmp', 'REGISTRY.md.tmp', 'private/reports.jsonl.tmp', 'shareable/REGISTRY.md.tmp'];
+  for (const s of stale) writeUnder(home, `registry/${s}`, `stale private copy ${TITLE}\n`);
+  try {
+    runBuild({ home, now: NOW });
+    for (const s of stale) assert.equal(existsSync(path.join(home, 'registry', ...s.split('/'))), false, s);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
