@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,8 +11,8 @@ import { drawSample } from './lib.mjs';
 import * as registry from './registry.mjs';
 
 const {
-  ROLES, buildRegistry, ledgerRuns, makeRedactor, matchRun, parseJsonl, phraseHash, phraseOf, readers, redactEntry,
-  roleRelevance, runBuild, toCsv,
+  ROLES, buildRegistry, ledgerRuns, makeRedactor, matchRun, parseJsonl, parseRedactList, phraseHash, phraseOf, readers, redactEntry,
+  roleRelevance, runBuild, shareVocabulary, shareableScan, toCsv,
 } = registry;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,7 @@ const NOW = Date.parse('2026-11-04T22:00:00Z');
 // A placeholder phrase, not anyone's name: it stands in for a name on the redaction list.
 const PLACEHOLDER = 'Testperson Placeholder';
 const CITED = { evidence: 'cited', source_urls: 40, source_hosts: 30 };
+const opaqueId = (key) => createHash('sha256').update(key).digest('hex').slice(0, 12);
 
 function report({ title, domain, kind = 'deep-research', created = '2026-11-04T16:45:00.000Z', id = 'docA', evidence = CITED, body = '# Overview\n\nText.\n' }) {
   const fields = {
@@ -60,28 +62,36 @@ function checkedSample(statuses) {
   return { records: filled, manifest };
 }
 
-function makeHome({ reports = {}, ledger = null, verify = {}, denylist = [PLACEHOLDER], exclude = [] } = {}) {
+function writeUnder(root, rel, text) {
+  const file = path.join(root, ...rel.split('/'));
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, text);
+}
+
+function makeHome({ reports = {}, ledger = null, verify = {}, denylist = [PLACEHOLDER], exclude = [], excludeIds = [], quarantine = {} } = {}) {
   const home = mkdtempSync(path.join(tmpdir(), 'registry-test-'));
-  for (const [key, text] of Object.entries(reports)) {
-    const file = path.join(home, 'corpus', key);
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, text);
-  }
+  for (const [key, text] of Object.entries(reports)) writeUnder(home, `corpus/${key}`, text);
+  for (const [key, text] of Object.entries(quarantine)) writeUnder(home, `quarantine/${key}`, text);
   if (ledger) writeFileSync(path.join(home, 'gemini-usage.jsonl'), `${ledger.map((r) => JSON.stringify(r)).join('\n')}\n`);
   mkdirSync(path.join(home, 'verify'), { recursive: true });
   for (const [name, text] of Object.entries(verify)) writeFileSync(path.join(home, 'verify', name), text);
   if (denylist) {
-    mkdirSync(path.join(home, 'registry'), { recursive: true });
     const line = (p) => `${phraseHash(p)} ${phraseOf(p).split(' ').length}  # test`;
-    writeFileSync(path.join(home, 'registry', 'redact.sha256.txt'), `# test list\n${denylist.map(line).join('\n')}\n`);
+    writeUnder(home, 'registry/redact.sha256.txt', `# test list\n${denylist.map(line).join('\n')}\n`);
   }
   if (exclude.length) writeFileSync(path.join(home, 'exclude.txt'), `${exclude.join('\n')}\n`);
+  if (excludeIds.length) writeFileSync(path.join(home, 'exclude-ids.txt'), `${excludeIds.join('\n')}\n`);
   return home;
 }
 
 const jsonl = (records) => `${records.map((r) => JSON.stringify(r)).join('\n')}\n`;
 const STEM = 'agentic-income-streams__2026-11-04-creator-pricing-economics-study';
-const readRows = (home) => readFileSync(path.join(home, 'registry', 'reports.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+const TIER_FILES = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'];
+const read = (home, tier, name) => readFileSync(path.join(home, 'registry', tier, name), 'utf8');
+const rowsOf = (home, tier) => read(home, tier, 'reports.jsonl').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const readRows = (home) => rowsOf(home, 'private');
+const tierText = (home, tier) => TIER_FILES.map((n) => read(home, tier, n)).join('\n');
+const allOutputs = (home) => `${tierText(home, 'private')}\n${tierText(home, 'shareable')}`;
 
 function filesUnder(dir) {
   return readdirSync(dir).flatMap((n) => (statSync(path.join(dir, n)).isDirectory() ? filesUnder(path.join(dir, n)).map((f) => `${n}/${f}`) : [n]));
@@ -107,15 +117,15 @@ test('a row carries front matter, ledger timing, measured cost and Drive provena
 });
 
 test('an unsampled report is unranked and has no claim-derived scores', () => {
-  const { rows } = buildRegistry({ reports: [{ key: KEY, text: STUDY }], domains, now: NOW });
-  const [r] = rows;
-  assert.equal(r.release, 'unsampled');
-  assert.equal(r.rank_score, 'unranked');
-  assert.equal(r.score_evidence_integrity, null);
-  assert.equal(r.score_verification_coverage, null);
-  assert.deepEqual([r.score_source_breadth, r.score_freshness, r.score_economic_relevance], [15, 15, 15]);
-  const csv = toCsv(rows, ['key', 'rank_score', 'score_evidence_integrity']);
-  assert.match(csv, /,unranked,\n$/);
+  const { rows, shareRows } = buildRegistry({ reports: [{ key: KEY, text: STUDY }], domains, now: NOW });
+  for (const r of [rows[0], shareRows[0]]) {
+    assert.equal(r.release, 'unsampled');
+    assert.equal(r.rank_score, 'unranked');
+    assert.equal(r.score_evidence_integrity, null);
+    assert.equal(r.score_verification_coverage, null);
+    assert.deepEqual([r.score_source_breadth, r.score_freshness, r.score_economic_relevance], [15, 15, 15]);
+  }
+  assert.match(toCsv(rows, ['key', 'rank_score', 'score_evidence_integrity']), /,unranked,\n$/);
 });
 
 test('a contradicted claim blocks release but the report is still ranked for review', () => {
@@ -131,6 +141,8 @@ test('a contradicted claim blocks release but the report is still ranked for rev
     assert.equal(r.checker, 'independent-test-checker');
     assert.equal(typeof r.rank_score, 'number');
     assert.equal(r.score_evidence_integrity, 26.7);
+    const [s] = rowsOf(home, 'shareable');
+    assert.deepEqual([s.release, s.release_block_count, s.checker_recorded, s.rank_score], ['blocked', r.release_blocks.length, 'yes', r.rank_score]);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -159,7 +171,7 @@ test('without a usage ledger the run and cost columns stay blank and the produce
     assert.equal(r.producer, 'gemini-deep-research');
     assert.equal(r.producer_basis, 'front-matter-classifier');
     assert.equal(r.producer_mode, 'unknown');
-    assert.match(readFileSync(path.join(home, 'registry', 'REGISTRY.md'), 'utf8'), /No usage ledger was found/);
+    for (const tier of ['private', 'shareable']) assert.match(read(home, tier, 'REGISTRY.md'), /No usage ledger was found/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -184,9 +196,7 @@ test('a listed name is redacted from every output, keys keep a slug shape, and t
   const home = makeHome({ reports: { [key]: report({ title: `${PLACEHOLDER} — Positioning Brief`, domain: 'marketing' }) } });
   try {
     runBuild({ home, now: NOW });
-    for (const name of ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md']) {
-      assert.doesNotMatch(readFileSync(path.join(home, 'registry', name), 'utf8'), /testperson/i, name);
-    }
+    assert.doesNotMatch(allOutputs(home), /testperson/i);
     const [r] = readRows(home);
     assert.equal(r.key, 'marketing/2026-11-01-redacted-positioning-brief.md');
     assert.equal(r.title, '[redacted] — Positioning Brief');
@@ -206,15 +216,14 @@ test('the redactor normalizes case and separators and reports what matched', () 
   assert.equal(redact('Nothing to hide').hits.size, 0);
 });
 
-test('a title matching a private exclusion pattern once separators are normalized is flagged and redacted', () => {
+test('a title matching a private exclusion pattern once separators are normalized is withheld from both tiers', () => {
   const key = 'marketing/2026-11-01-notes.md';
-  const home = makeHome({ reports: { [key]: report({ title: `${PLACEHOLDER} Notes`, domain: 'marketing' }) }, denylist: [], exclude: ['# private', 'testperson_placeholder'] });
+  const home = makeHome({ reports: { [key]: report({ title: `${PLACEHOLDER} Notes`, domain: 'marketing' }), [KEY]: STUDY }, denylist: [], exclude: ['# private', 'testperson_placeholder'] });
   try {
     runBuild({ home, now: NOW });
-    const [r] = readRows(home);
-    assert.equal(r.privacy, 'exclusion-match');
-    assert.equal(r.title, '[redacted] Notes');
-    assert.match(readFileSync(path.join(home, 'registry', 'REGISTRY.md'), 'utf8'), /1 report\(s\) match a private exclusion pattern/);
+    assert.deepEqual(readRows(home).map((r) => r.key), [KEY]);
+    assert.doesNotMatch(allOutputs(home), /testperson|2026-11-01-notes/i);
+    for (const tier of ['private', 'shareable']) assert.match(read(home, tier, 'REGISTRY.md'), /1 excluded, withheld/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -230,9 +239,9 @@ test('build fails closed without a redaction list and writes only under registry
     const allowed = cli(['build', '--allow-unredacted']);
     assert.equal(allowed.status, 0, allowed.stderr);
     const added = filesUnder(home).filter((f) => !before.includes(f));
-    assert.deepEqual(added.sort(), ['registry/REGISTRY.md', 'registry/reports.csv', 'registry/reports.jsonl', 'registry/roles.csv']);
-    assert.match(readFileSync(path.join(home, 'registry', 'REGISTRY.md'), 'utf8'), /Not checked for personal names/);
-    assert.match(readFileSync(path.join(home, 'registry', 'REGISTRY.md'), 'utf8'), /Weights are hypotheses/);
+    assert.deepEqual(added.sort(), ['private', 'shareable'].flatMap((t) => TIER_FILES.map((n) => `registry/${t}/${n}`)).sort());
+    assert.match(read(home, 'private', 'REGISTRY.md'), /Not checked for personal names/);
+    for (const tier of ['private', 'shareable']) assert.match(read(home, tier, 'REGISTRY.md'), /Weights are hypotheses/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -257,8 +266,6 @@ test('CSV cells are quoted and a leading formula character is neutralized', () =
 
 // ---------------------------------------------------------------------------------------------
 // Regressions from the cross-family review of ee6d84f, one per finding.
-const OUTPUTS = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'];
-const allOutputs = (home) => OUTPUTS.map((n) => readFileSync(path.join(home, 'registry', n), 'utf8')).join('\n');
 
 test('review 1: a redaction phrase of any length is redacted, and a list line without a word count stops the build', () => {
   const long = 'Alpha Bravo Charlie Delta Echo';
@@ -269,9 +276,9 @@ test('review 1: a redaction phrase of any length is redacted, and a list line wi
     assert.doesNotMatch(allOutputs(home), /charlie/i, 'a five-word phrase leaks if only short phrases are searched');
     assert.equal(readRows(home)[0].privacy, 'redacted');
     writeFileSync(path.join(home, 'registry', 'redact.sha256.txt'), `${phraseHash(long)}  # count missing\n`);
-    rmSync(path.join(home, 'registry', 'REGISTRY.md'));
+    rmSync(path.join(home, 'registry', 'private', 'REGISTRY.md'));
     assert.throws(() => runBuild({ home, now: NOW }), /word count/);
-    assert.equal(existsSync(path.join(home, 'registry', 'REGISTRY.md')), false, 'nothing is written when the list is refused');
+    assert.equal(existsSync(path.join(home, 'registry', 'private', 'REGISTRY.md')), false, 'nothing is written when the list is refused');
   } finally { rmSync(home, { recursive: true, force: true }); }
   const cli = spawnSync(process.execPath, [path.join(HERE, 'registry.mjs'), 'redact-hash', long, '--label', 'test'], { encoding: 'utf8' });
   assert.equal(cli.stdout.trim(), `${phraseHash(long)} 5  # test`);
@@ -352,12 +359,107 @@ test('review 6: coverage counts claims in every extraction mode, so a table-only
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('review 7: a report saved with lone CR line endings keeps its source, Drive id and privacy flag', () => {
-  const text = report({ title: TITLE, domain: 'agentic-income-streams', id: 'quarantined-doc' }).replace(/\n/g, '\r');
-  const { rows } = buildRegistry({ reports: [{ key: KEY, text }], domains, exclusionIds: new Set(['quarantined-doc']), now: NOW });
-  const [r] = rows;
-  assert.equal(r.source, 'google-drive');
-  assert.equal(r.drive_doc_id, 'quarantined-doc');
-  assert.equal(r.privacy, 'excluded-id');
-  assert.equal(r.title, TITLE);
+test('review 7: a report saved with lone CR line endings keeps its source and Drive id, and its exclusion still applies', () => {
+  const kept = report({ title: TITLE, domain: 'agentic-income-streams', id: 'kept-doc' }).replace(/\n/g, '\r');
+  const excludedKey = 'marketing/2026-11-01-quarantined-doc.md';
+  const excluded = report({ title: 'Quarantined Doc', domain: 'marketing', id: 'quarantined-doc' }).replace(/\n/g, '\r');
+  const reg = buildRegistry({ reports: [{ key: KEY, text: kept }, { key: excludedKey, text: excluded }], domains, exclusionIds: new Set(['quarantined-doc']), now: NOW });
+  assert.equal(reg.withheld, 1, 'the excluded Drive id is read from a lone-CR file');
+  const [r] = reg.rows;
+  assert.deepEqual([reg.rows.length, r.source, r.drive_doc_id, r.title], [1, 'google-drive', 'kept-doc', TITLE]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Regressions from the cross-family review of 0c224fe: two tiers, withheld exclusions, hardened denylist.
+
+// A synthetic confidential title made only of non-ASCII code points: circled and full-width letters, zero-width and
+// bidi controls, a soft hyphen, Cyrillic look-alikes of Latin capitals, both German sharp s forms and no-break spaces.
+const CONFIDENTIAL = [
+  'ⓏⓍⓆⓋ', '​­‮', 'КОМРАСТ', '⁦ＺＸＱＶ⁩',
+  'ＳＴＲＡẞＥ', 'ｓｔｒａßｅ‍',
+].join(' ');
+
+test('review 6.1: the shareable tier carries no character, word, key or Drive id of a confidential report', () => {
+  assert.ok(![...CONFIDENTIAL].some((c) => c.charCodeAt(0) < 0x80), 'the fixture is all non-ASCII');
+  const key = 'marketing/2026-11-01-zxqvsecretdossier.md';
+  const driveId = 'qqzxqvdriveid77';
+  const home = makeHome({ reports: { [key]: report({ title: CONFIDENTIAL, domain: 'marketing', id: driveId }), [KEY]: STUDY }, ledger: LEDGER });
+  writeUnder(home, 'registry/reports.csv', `stale private copy ${key}\n`);
+  try {
+    runBuild({ home, now: NOW });
+    assert.equal(existsSync(path.join(home, 'registry', 'reports.csv')), false, 'a stale root-level private copy is removed');
+    const ids = rowsOf(home, 'shareable').map((r) => r.row_id).sort();
+    assert.deepEqual(ids, [opaqueId(key), opaqueId(KEY)].sort(), 'the report is present, by opaque id only');
+    for (const name of TIER_FILES) {
+      const text = read(home, 'shareable', name);
+      assert.doesNotMatch(text, /[^\t\n\r\x20-\x7e]/, `${name} is printable ASCII`);
+      for (const cp of new Set(CONFIDENTIAL)) assert.ok(!text.includes(cp), `${name} holds U+${cp.codePointAt(0).toString(16)}`);
+      assert.doesNotMatch(text, /zxqv|strasse|kompact|secretdossier|qqzxqv|creator pricing|pricing study|topic|docA/i, name);
+    }
+    assert.equal(rowsOf(home, 'private').find((r) => r.drive_doc_id === driveId).title, CONFIDENTIAL, 'the private tier keeps the title');
+    assert.match(read(home, 'private', 'REGISTRY.md'), /PRIVATE: do not share/i);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+  const vocabulary = shareVocabulary(new Set(['marketing']));
+  assert.deepEqual(shareableScan('| 3d12d62c8411 | marketing | pass | 2026-11-04T17:26:39.041Z |', vocabulary), { nonAscii: 0, unknownWords: 0, ok: true });
+  assert.equal(shareableScan('| 3d12d62c8411 | Confidential dossier |', vocabulary).unknownWords, 2, 'free text is refused');
+  assert.equal(shareableScan('café', vocabulary).nonAscii, 1);
+});
+
+test('review 6.2: documents excluded by Drive id, quarantine or exclusion pattern are withheld from both tiers', () => {
+  const byId = 'marketing/2026-11-01-withheld-alpha.md';
+  const byQuarantine = 'marketing/2026-11-01-withheld-bravo.md';
+  const byPattern = 'marketing/2026-11-01-withheld-charlie.md';
+  const home = makeHome({
+    reports: {
+      [KEY]: STUDY,
+      [byId]: report({ title: 'Alpha Confidential Memo', domain: 'marketing', id: 'excluded-drive-id' }),
+      [byQuarantine]: report({ title: 'Bravo Confidential Memo', domain: 'marketing', id: 'bravo-drive-id' }),
+      [byPattern]: report({ title: 'Charlie Secretclient Memo', domain: 'marketing', id: 'charlie-drive-id' }),
+    },
+    quarantine: { [byQuarantine]: 'quarantined copy\n' }, excludeIds: ['excluded-drive-id'], exclude: ['secretclient'], denylist: [],
+  });
+  try {
+    runBuild({ home, now: NOW });
+    for (const tier of ['private', 'shareable']) {
+      assert.deepEqual(rowsOf(home, tier).map((r) => r.row_id), [opaqueId(KEY)], `${tier} has only the kept report`);
+      const text = tierText(home, tier);
+      assert.doesNotMatch(text, /alpha|bravo|charlie|secretclient|drive-id/i, tier);
+      for (const k of [byId, byQuarantine, byPattern]) assert.ok(!text.includes(opaqueId(k)), `${tier} names no withheld row id`);
+      assert.match(read(home, tier, 'REGISTRY.md'), /3 excluded, withheld/);
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review 6.3: the private-tier denylist ignores format characters, folds circled and full-width letters, and treats both sharp s forms alike', () => {
+  const redact = makeRedactor({ entries: [redactEntry(PLACEHOLDER), redactEntry('Straße Research')] });
+  const variants = [
+    'Test­person Placeholder', 'Test​person Placeholder', 'Testp‍erson Placeholder', 'Test‮person‬ Placeholder',
+    '⁦Testperson⁩ Placeholder', 'Ⓣestperson Placeholder', 'Ｔｅｓｔｐｅｒｓｏｎ Placeholder',
+    'STRAẞE RESEARCH', 'STRASSE research', 'straße Research',
+  ];
+  for (const v of variants) assert.equal(redact(`Notes on ${v} today`).text, 'Notes on [redacted] today', JSON.stringify(v));
+  // Documented limit: a Cyrillic look-alike is a different letter, so the denylist misses it; the shareable tier,
+  // which carries no report text at all, is what covers that case (review 6.1).
+  assert.equal(redact('Тestperson Placeholder').hits.size, 0);
+  const key = 'marketing/2026-11-01-circled-brief.md';
+  const home = makeHome({ reports: { [key]: report({ title: 'Ⓣest­person Placeholder brief', domain: 'marketing' }) } });
+  try {
+    runBuild({ home, now: NOW });
+    const [r] = readRows(home);
+    assert.deepEqual([r.title, r.privacy], ['[redacted] brief', 'redacted']);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review 6.4: a word count that is not a positive safe integer stops the build', () => {
+  const hash = phraseHash(PLACEHOLDER);
+  for (const count of ['9'.repeat(400), '0', '9007199254740993']) {
+    assert.throws(() => parseRedactList(`${hash} ${count}  # bad\n`), /positive whole word count/, count.slice(0, 20));
+  }
+  assert.deepEqual(parseRedactList(`# comment\n${hash} 2  # ok\n`), [{ hash, words: 2 }]);
+  const home = makeHome({ reports: { [KEY]: STUDY } });
+  try {
+    writeFileSync(path.join(home, 'registry', 'redact.sha256.txt'), `${hash} ${'9'.repeat(400)}  # overflow\n`);
+    assert.throws(() => runBuild({ home, now: NOW }), /positive whole word count/);
+    assert.equal(existsSync(path.join(home, 'registry', 'shareable')), false, 'nothing is written');
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });

@@ -1,18 +1,28 @@
 #!/usr/bin/env node
-// Research registry: one transparent row per corpus report, a role relevance matrix and REGISTRY.md.
+// Research registry: one transparent row per corpus report, a role relevance matrix and REGISTRY.md, in two tiers.
 //
 //   node registry.mjs build [--allow-unredacted]
 //       corpus front matter + Gemini usage ledger + claim records -> RESEARCH_HOME/registry/
-//       reports.csv, reports.jsonl, roles.csv, REGISTRY.md
+//         shareable/  reports.csv, reports.jsonl, roles.csv, REGISTRY.md: opaque ids and structural fields only
+//         private/    the same files with titles, corpus keys, paths and Drive links: never share these
 //   node registry.mjs redact-hash "<phrase>" [--label <label>]
 //       prints the line to append to RESEARCH_HOME/registry/redact.sha256.txt
 //
-// Reads RESEARCH_HOME (corpus/, gemini-usage.jsonl, verify/, exclude.txt, exclude-ids.txt, domains.local.json,
-// registry/weights.local.json, registry/redact.sha256.txt) and writes only RESEARCH_HOME/registry/.
-// The release verdict is the claim gate's own (`corpus.mjs verify score`); the rank only orders review.
+// Two tiers, because a name denylist can never be complete (look-alike letters from other scripts, new
+// spellings, names nobody listed). The shareable tier carries no text from any report, file name, Drive id or
+// ledger title: each report is an opaque id with enumerated, numeric and date fields, and before anything is
+// written every shareable word must come from this file's own vocabulary and every character must be printable
+// ASCII, or the build stops. The private tier keeps titles for the operator and is redacted best-effort.
+// Documents excluded by Drive id, quarantine or a private exclusion pattern are withheld from both tiers; only
+// their count is reported.
+//
+// Reads RESEARCH_HOME (corpus/, quarantine/, gemini-usage.jsonl, verify/, exclude.txt, exclude-ids.txt,
+// domains.local.json, registry/weights.local.json, registry/redact.sha256.txt) and writes only
+// RESEARCH_HOME/registry/. The release verdict is the claim gate's own (`corpus.mjs verify score`); the rank
+// only orders review.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -87,39 +97,170 @@ export const ROLES = {
   },
 };
 
-export const REPORT_COLUMNS = [
+// ---------------------------------------------------------------------------------------------
+// Columns. The private tier adds titles, keys, paths, Drive links, checker names and block reasons; the shareable
+// tier has only the opaque id and fields that are enumerated, numeric or dates.
+export const SHARE_COLUMNS = [
+  'row_id', 'domain', 'kind', 'source', 'created', 'age_days', 'producer', 'producer_mode', 'producer_model_recorded', 'producer_basis',
+  'run_started', 'run_finished', 'ledger_run_status', 'ledger_domain', 'cost_basis', 'window_pct_cost', 'weekly_pct_cost',
+  'source_urls', 'source_hosts', 'evidence', 'evidence_basis',
+  'claims_in_report', 'claims_sampled', 'sampled_share', 'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted',
+  'claims_unsupported', 'claims_garbled', 'claims_unreachable', 'claims_pending', 'verified_rate', 'supported_rate',
+  'release', 'release_block_count', 'checked_at', 'checker_recorded', 'claims_backup',
+  'score_evidence_integrity', 'score_source_breadth', 'score_freshness', 'score_verification_coverage', 'score_economic_relevance', 'rank_score',
+];
+export const PRIVATE_COLUMNS = [
   'row_id', 'key', 'title', 'domain', 'kind', 'source', 'created', 'age_days',
   'producer', 'producer_mode', 'producer_model', 'producer_basis',
   'run_started', 'run_finished', 'ledger_run_status', 'ledger_domain', 'cost_basis', 'window_pct_cost', 'weekly_pct_cost',
   'drive_doc_id', 'drive_doc_url', 'local_path', 'source_urls', 'source_hosts', 'evidence', 'evidence_basis',
-  'claims_in_report', 'claims_sampled', 'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted',
+  'claims_in_report', 'claims_sampled', 'sampled_share', 'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted',
   'claims_unsupported', 'claims_garbled', 'claims_unreachable', 'claims_pending', 'verified_rate', 'supported_rate',
-  'release', 'release_blocks', 'checker', 'checked_at', 'claims_backup', 'privacy',
+  'release', 'release_block_count', 'release_blocks', 'checker', 'checked_at', 'claims_backup', 'privacy',
   'score_evidence_integrity', 'score_source_breadth', 'score_freshness', 'score_verification_coverage', 'score_economic_relevance', 'rank_score',
 ];
-export const ROLE_COLUMNS = ['row_id', 'key', 'title', 'domain', 'kind', 'evidence', 'release', ...Object.keys(ROLES), 'human_reader', 'agent_reader'];
+export const SHARE_ROLE_COLUMNS = ['row_id', 'domain', 'kind', 'evidence', 'release', ...Object.keys(ROLES), 'human_reader', 'agent_reader'];
+export const PRIVATE_ROLE_COLUMNS = ['row_id', 'key', 'title', 'domain', 'kind', 'evidence', 'release', ...Object.keys(ROLES), 'human_reader', 'agent_reader'];
+
+// The values a shareable enumerated field may take; anything else is written as 'other'.
+const OTHER = 'other';
+const ENUMS = {
+  kind: ['deep-research', 'gemini-canvas', 'estate-doc', 'platform-catalog', 'unknown'],
+  source: ['google-drive', 'local-file', 'live-catalogs', 'unknown'],
+  producer: ['gemini-deep-research', 'gemini-chat', 'unknown'],
+  producer_mode: ['deep-research', 'unknown'],
+  producer_basis: ['usage-ledger', 'front-matter-classifier', 'none'],
+  ledger_run_status: ['done', 'abandoned', 'open'],
+  cost_basis: ['no-ledger', 'no-ledger-run', 'measured', 'not-measured', 'ambiguous-repeated-title'],
+  evidence: ['cited', 'uncited'],
+  evidence_basis: ['front-matter', 'computed-by-registry'],
+  release: ['pass', 'blocked', 'unsampled'],
+  claims_backup: ['none', 'identical', 'differs', 'backup-only'],
+};
+const SHARE_NUMBERS = [
+  'age_days', 'window_pct_cost', 'weekly_pct_cost', 'source_urls', 'source_hosts', 'claims_in_report', 'claims_sampled', 'sampled_share',
+  'claims_checked', 'claims_verified', 'claims_partial', 'claims_contradicted', 'claims_unsupported', 'claims_garbled',
+  'claims_unreachable', 'claims_pending', 'verified_rate', 'supported_rate', 'release_block_count',
+  'score_evidence_integrity', 'score_source_breadth', 'score_freshness', 'score_verification_coverage', 'score_economic_relevance',
+];
+const SHARE_DATES = ['created', 'run_started', 'run_finished', 'checked_at'];
+
+// How a person and an agent should consume a report, by what has been checked, not by topic. A pass covers
+// only the sampled claims a checker supported; it says nothing about the rest of the report.
+const READERS = {
+  pass: ['Trust only the sampled claims marked verified or partial, as of their check date; the rest is unverified AI synthesis.', 'Use only verified and partial claim records, each with its source and date; treat everything else in the report as unverified.'],
+  blocked: ['Read the blocked and contradicted claims first; use it for direction, not numbers.', 'Use only verified claim records; never repeat contradicted or unchecked claims.'],
+  local: ['Estate document as of its recorded commit; check for a newer version.', 'Cite with path and commit; re-read the source when it may have changed.'],
+  cited: ['Skim as unverified AI synthesis; check any number before acting on it.', 'Retrieve for orientation only; label every statement unverified-ai-synthesis.'],
+  uncited: ['Background reading; it cites too few sources to check claim by claim.', 'Context only; never cite it as evidence.'],
+  notes: ['Internal planning notes; read as opinion, not research.', 'Planning context only; do not retrieve it as evidence.'],
+};
+
+export function readers(row) {
+  if (row.release === 'pass') return READERS.pass;
+  if (row.release === 'blocked') return READERS.blocked;
+  if (row.source === 'local-file') return READERS.local;
+  if (row.evidence === 'cited') return READERS.cited;
+  return row.kind === 'deep-research' ? READERS.uncited : READERS.notes;
+}
+
+// Every word REGISTRY.md may contain in either tier, beyond values, ids, numbers and dates. ASCII only.
+const TEXT = {
+  headPrivate: '# Research registry: PRIVATE tier',
+  headShare: '# Research registry: shareable tier',
+  notePrivate: '> **Private: do not share.** This tier holds titles, corpus keys, file paths and Drive links. Names are redacted against the private name list on a best-effort basis only: look-alike letters from another script, and a name glued to the next word by an invisible character, are not caught. Share `registry/shareable/` instead.',
+  noteShare: '> **Shareable.** This tier holds no titles, file paths, corpus keys, Drive ids or links, and no text taken from a report or a ledger title. Each report is an opaque id (the first 12 hex digits of the SHA-256 of its corpus key) with enumerated, numeric and date fields only. Before writing, every character was checked to be printable ASCII and every word to be in the registry vocabulary; anything else stops the build.',
+  hypotheses: '> **Weights are hypotheses.** The rank score only orders what to review next; it never releases a report. Release comes only from the claim gate (`node corpus.mjs verify score <key>`): `pass` or `blocked`. A pass covers only the sampled claims a checker supported, never the whole report. A report with no claim records is `unsampled`, and its rank is `unranked`.',
+  built: 'Built {at} from {n} corpus reports; {w} excluded, withheld (excluded by Drive id, quarantine or a private exclusion pattern: no row in either tier). reports.csv and reports.jsonl hold every column of this tier; roles.csv holds the role relevance matrix; all three share `row_id`.',
+  paths: 'Paths are relative to RESEARCH_HOME.',
+  checkedPrivate: 'Name check: every private output was scanned against {d} hashed name phrase(s) and {p} private exclusion pattern(s) before writing; a hit stops the build. Matches show as [redacted].',
+  uncheckedPrivate: '**Not checked for personal names:** built with --allow-unredacted and no redaction list.',
+  checkedShare: 'Structure check: printable ASCII only, and no word outside the registry vocabulary.',
+  hSummary: '## Summary', hWeights: '## Weights (hypotheses)', hRanked: '## Ranked: claim-sampled reports',
+  hQueue: '## Next to sample: unsampled reports with cited evidence',
+  queueNote: 'Ordered by the three sub-scores that need no claim checks (breadth, freshness, economic relevance). This is a sampling queue, not a rank.',
+  hLedger: '## Gemini usage ledger', hProblems: '## Problems found', hRoles: '## Roles: reports at relevance 2 or more', hAll: '## All reports',
+  none: '- None.', na: 'n/a', local: '(local)', withheld: 'withheld',
+  noLedger: 'No usage ledger was found, so run timing and cost columns are blank.',
+  measured: 'Measured runs: {n}. Mean cost per measured run: window {s}, weekly {w}. A run is measured only when it is the only run between the readings around it and no meter reset falls inside (rules: README, "Gemini usage").',
+  econ: 'Economic domain weights: {list}. Unlisted domains weigh 0.',
+  summary: {
+    reports: 'Reports in this tier', kinds: 'Kind deep-research / gemini-canvas / other', cited: 'Evidence cited (at least 10 URLs and 5 hosts)',
+    sampled: 'Claim-sampled', release: 'Release pass / blocked / unsampled', ledger: 'Usage-ledger runs / matched to a report / with a measured cost',
+    withheld: 'Excluded, withheld (no row in either tier)', redacted: 'Titles with a redacted name (private tier only)',
+  },
+  head: {
+    measure: 'Measure', count: 'Count', component: 'Component', max: 'Max', rule: 'Rule', rank: 'Rank', report: 'Report', domain: 'Domain',
+    release: 'Release', vci: 'Verified / checked / in report', share: 'Sampled share', integrity: 'Integrity', breadth: 'Breadth',
+    fresh: 'Fresh', coverage: 'Coverage', econ: 'Econ', blocks: 'Blocks', kind: 'Kind', hosts: 'Hosts', evidence: 'Evidence', role: 'Role',
+    rel2: 'Relevance >= 2', rel3: 'Relevance 3', runTitle: 'Run title', ledgerDomain: 'Ledger domain', status: 'Status',
+    started: 'Started', finished: 'Finished', matched: 'Matched report',
+  },
+  component: { integrity: 'Evidence integrity', breadth: 'Source breadth', freshness: 'Freshness', coverage: 'Verification coverage', economic: 'Economic relevance' },
+  rule: {
+    integrity: 'verified / checked * min(1, checked / min({s}, claims in report)); blank when unsampled. Claims in report = every claim in any extraction mode (table and cited prose)',
+    breadth: 'min(1, distinct cited hosts / {h})',
+    freshness: 'full inside the domain refresh window (staleDays, default {d}), then linear to 0 over {w} more windows',
+    coverage: 'min(1, checked claims / claims in report across all extraction modes); blank when unsampled',
+    economic: 'domain weight * max; set only by the table below, never by keywords',
+  },
+};
+
+const PROBLEMS = {
+  noManifest: 'claims file(s) have no sampling manifest, so the gate blocks them until resampled with `verify sample <key> --force`',
+  unreadable: 'claims file(s) could not be read; their reports are blocked',
+  scoringFailed: 'report(s) could not be scored by the claim gate; they are blocked',
+  domainDiffers: 'ledger-matched report(s) sit in a different corpus domain than the usage-ledger run recorded',
+  notMeasured: 'ledger-matched report(s) have no measured cost: another run was open between the readings around it, or a meter reset fell inside',
+  openRuns: 'usage-ledger run(s) are still open (no done or abandon record)',
+  orphanCloses: 'usage-ledger done/abandon record(s) name a title that matches no run (a typo leaves the real run open)',
+  unmatchedRuns: 'finished usage-ledger run(s) match no corpus report (not exported yet, or the title changed)',
+  computedEvidence: 'report(s) lack evidence fields in front matter; the registry computed them from the body',
+  withheld: 'excluded document(s) are still in the corpus (Drive id, quarantine or private exclusion pattern); they are withheld from both tiers',
+  backupDiffers: 'claims file(s) differ from their checked backup',
+  backupOnly: 'checked backup(s) have no primary claims file; the gate reads only the primary, so those reports show as unsampled',
+  orphanClaims: 'claims file(s) name no report in the corpus',
+  noEconWeight: 'sampled report(s) sit in a domain with no economic weight (for example unrouted) and score 0 on economic relevance',
+  noLedger: 'no usage ledger was found; run timing and cost columns are blank',
+};
 
 // ---------------------------------------------------------------------------------------------
-// Privacy. Every string written is passed through the redactor, and every output is scanned again before
-// anything is written. Names are listed as SHA-256 hashes of the normalized phrase, so the list itself names no
-// one; hashes of short names are guessable, so the list stays private. exclude.txt patterns redact too.
+// Private-tier name redaction (best effort; defence in depth behind the shareable tier). Every private string is
+// passed through the redactor, and every private output is scanned again before anything is written. Names are
+// listed as SHA-256 hashes of the normalized phrase, so the list itself names no one; hashes of short names are
+// guessable, so the list stays private. exclude.txt patterns redact too.
 //
-// One tokenizer serves hashing, redaction and the final scan, so a phrase is matched however it is encoded:
-// a raw word is a run of letters, digits and combining marks in the original text, folded by compatibility
-// decomposition (NFKD: full-width and ligature forms become plain letters), full case folding (upper then
-// lower, so "ß" and "SS" agree) and removal of combining marks (composed and decomposed accents agree).
-// A raw word can fold into several tokens ("½" -> "1 2"); they share its span.
-const RAW_WORD_RE = /[\p{L}\p{N}\p{M}]+/gu;
-const FOLDED_WORD_RE = /[\p{L}\p{N}]+/gu;
-const fold = (s) => s.normalize('NFKD').toUpperCase().toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '');
+// Matching text is normalized one code point at a time, keeping a map back to the original so a match is redacted
+// in place: NFKC maps full-width, circled and ligature forms to plain letters; every format character (\p{Cf}:
+// zero-width, bidi controls, soft hyphen) is dropped; NFD then drops every nonspacing mark (\p{Mn}: accents,
+// variation selectors); case is folded lower-upper-lower, so "ß", "ẞ" and "SS" agree. NOT caught: look-alike
+// letters from another script (a Cyrillic "а" for a Latin "a") and a name glued to the next word by an invisible
+// character. A denylist cannot be complete, which is why only the shareable tier is meant for others.
+const CF_RE = /\p{Cf}/gu;
+const MN_RE = /\p{Mn}/gu;
+const WORD_RE = /[\p{L}\p{N}\p{M}]+/gu;
+const foldCase = (s) => s.toLowerCase().toUpperCase().toLowerCase();
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
+function foldCodePoint(cp) {
+  if (cp.charCodeAt(0) < 0x80) return cp.toLowerCase();
+  const plain = cp.normalize('NFKC').replace(CF_RE, '').normalize('NFD').replace(MN_RE, '');
+  return foldCase(plain).normalize('NFD').replace(MN_RE, '');
+}
+
 function tokens(text) {
-  const out = [];
-  for (const m of String(text ?? '').matchAll(RAW_WORD_RE)) {
-    for (const w of fold(m[0]).match(FOLDED_WORD_RE) ?? []) out.push({ start: m.index, end: m.index + m[0].length, w });
+  const s = String(text ?? '');
+  let norm = '';
+  const from = [];
+  const to = [];
+  let i = 0;
+  for (const cp of s) {
+    const f = foldCodePoint(cp);
+    for (let k = 0; k < f.length; k += 1) { from.push(i); to.push(i + cp.length); }
+    norm += f;
+    i += cp.length;
   }
-  return out;
+  return [...norm.matchAll(WORD_RE)].map((m) => ({ start: from[m.index], end: to[m.index + m[0].length - 1], w: m[0] }));
 }
 
 export function phraseOf(text) {
@@ -138,15 +279,16 @@ export function redactEntry(phrase) {
 
 const ENTRY_RE = /^([0-9a-f]{64})\s+(\d+)(?:\s+#.*)?$/;
 
-// `<sha256> <word count>  # label` per line; blank lines and # comments are skipped. Any other line stops the
-// build: a malformed or count-less entry would otherwise leave its phrase unredacted without a sign.
+// `<sha256> <word count>  # label` per line; blank lines and # comments are skipped. Any other line, and any word
+// count that is not a positive safe integer, stops the build: such an entry would otherwise never match.
 export function parseRedactList(text) {
   return normalizeEol(text).split('\n').map((l, i) => [l.trim(), i + 1]).filter(([l]) => l && !l.startsWith('#')).map(([l, n]) => {
     const m = l.match(ENTRY_RE);
-    if (!m || Number(m[2]) < 1) {
-      throw new Error(`redaction list line ${n} is not "<sha256> <word count>  # label": regenerate it with "node registry.mjs redact-hash"`);
+    const words = m ? Number(m[2]) : NaN;
+    if (!Number.isSafeInteger(words) || words < 1) {
+      throw new Error(`redaction list line ${n} is not "<sha256> <word count>  # label" with a positive whole word count: regenerate it with "node registry.mjs redact-hash"`);
     }
-    return { hash: m[1], words: Number(m[2]) };
+    return { hash: m[1], words };
   });
 }
 
@@ -158,6 +300,16 @@ function mergeSpans(spans) {
     else out.push([...s]);
   }
   return out;
+}
+
+// A match also takes the format characters touching it, so no orphaned bidi or zero-width control is left behind.
+const FORMAT_CHAR_RE = /\p{Cf}/u;
+function widen(text, [a, b]) {
+  let start = a;
+  let end = b;
+  while (start > 0 && FORMAT_CHAR_RE.test(text[start - 1])) start -= 1;
+  while (end < text.length && FORMAT_CHAR_RE.test(text[end])) end += 1;
+  return [start, end];
 }
 
 // redact(text, mask) -> { text, hits }: hits holds 'denylist' and/or 'exclusion' for what matched.
@@ -180,7 +332,7 @@ export function makeRedactor({ entries = [], phrases = [] } = {}) {
       }
     }
     let out = text;
-    for (const [a, b] of mergeSpans(spans).reverse()) out = `${out.slice(0, a)}${mask}${out.slice(b)}`;
+    for (const [a, b] of mergeSpans(spans.map((s) => widen(text, s))).reverse()) out = `${out.slice(0, a)}${mask}${out.slice(b)}`;
     return { text: out, hits };
   };
 }
@@ -198,6 +350,45 @@ function redactRow(row, redact) {
   const out = Object.fromEntries(Object.entries(row).map(([k, v]) => [k,
     typeof v === 'string' ? clean(v, k) : Array.isArray(v) ? v.map((x) => clean(x, k)) : v]));
   return { row: out, hits };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shareable tier: a whitelist projection. Each field is an enum value, a finite number, an ISO date, a configured
+// domain id or the opaque id; nothing is copied as text. The scan below checks the rendered files again.
+const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?Z)?$/;
+const enumOf = (field, v) => (v === null || v === undefined ? null : ENUMS[field].includes(v) ? v : OTHER);
+const dateOf = (v) => (typeof v === 'string' && ISO_RE.test(v) ? v : null);
+const numOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const domainOf = (v, known) => (v === null || v === undefined ? null : known.has(v) ? v : OTHER);
+const OPAQUE_ID_RE = /^[0-9a-f]{12}$/;
+
+export function shareRow(row, knownDomains) {
+  const out = { row_id: OPAQUE_ID_RE.test(row.row_id) ? row.row_id : null, domain: domainOf(row.domain, knownDomains), ledger_domain: domainOf(row.ledger_domain, knownDomains) };
+  for (const f of Object.keys(ENUMS)) out[f] = enumOf(f, row[f]);
+  for (const f of SHARE_DATES) out[f] = dateOf(row[f]);
+  for (const f of SHARE_NUMBERS) out[f] = numOf(row[f]);
+  out.rank_score = row.rank_score === 'unranked' ? 'unranked' : numOf(row.rank_score);
+  out.producer_model_recorded = row.producer_model && row.producer_model !== 'unknown' ? 'yes' : 'no';
+  out.checker_recorded = row.release === 'unsampled' ? null : row.checker ? 'yes' : 'no';
+  return Object.fromEntries(SHARE_COLUMNS.map((c) => [c, out[c] ?? null]));
+}
+
+// The words the shareable tier may contain: its fixed text, column names, enum values, role ids, reader phrases and
+// configured domain ids (including those in the weights files, which are configuration, not report text). Numbers,
+// ISO date pieces and opaque ids are allowed by shape; JSON's null is allowed for empty fields.
+export function shareVocabulary(knownDomains, configuredIds = []) {
+  const sources = [TEXT, PROBLEMS, READERS, ENUMS, SHARE_COLUMNS, SHARE_ROLE_COLUMNS, Object.keys(ROLES), [...knownDomains], [...configuredIds],
+    [OTHER, 'unranked', 'yes', 'no', 'null']];
+  return new Set(JSON.stringify(sources).toLowerCase().match(/[a-z0-9]+/g));
+}
+
+const SHAPE_RE = /^(\d+|\d+[tz]\d*|[0-9a-f]{12})$/;
+
+// Counts only, never the offending text: an error message must not repeat what it refuses to write.
+export function shareableScan(text, vocabulary) {
+  const nonAscii = (String(text).match(/[^\t\n\r\x20-\x7e]/g) ?? []).length;
+  const unknownWords = (String(text).match(/[A-Za-z0-9]+/g) ?? []).filter((w) => !vocabulary.has(w.toLowerCase()) && !SHAPE_RE.test(w.toLowerCase())).length;
+  return { nonAscii, unknownWords, ok: nonAscii === 0 && unknownWords === 0 };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -262,7 +453,7 @@ export function matchRun(report, runs) {
 }
 
 // Line endings are normalized first, as the verifier does, so a file saved with CRLF or lone CR keeps its
-// source, Drive id and privacy flag.
+// source, Drive id and exclusion status.
 function reportFacts(key, text, exclusionIds) {
   const { meta, body } = parseFrontMatter(normalizeEol(text));
   const fromFm = meta.evidence !== undefined && meta.source_urls !== undefined && meta.source_hosts !== undefined;
@@ -366,92 +557,98 @@ export function roleRelevance(domain, { title, headings }, roleDomains = {}) {
   }));
 }
 
-// How a person and an agent should consume a report, by what has been checked, not by topic. A pass covers
-// only the sampled claims a checker supported; it says nothing about the rest of the report.
-export function readers(row) {
-  if (row.release === 'pass') return ['Trust only the sampled claims marked verified or partial, as of their check date; the rest is unverified AI synthesis.', 'Use only verified and partial claim records, each with its source and date; treat everything else in the report as unverified.'];
-  if (row.release === 'blocked') return ['Read the blocked and contradicted claims first; use it for direction, not numbers.', 'Use only verified claim records; never repeat contradicted or unchecked claims.'];
-  if (row.source === 'local-file') return ['Estate document as of its recorded commit; check for a newer version.', 'Cite with path and commit; re-read the source when it may have changed.'];
-  if (row.evidence === 'cited') return ['Skim as unverified AI synthesis; check any number before acting on it.', 'Retrieve for orientation only; label every statement unverified-ai-synthesis.'];
-  if (row.kind === 'deep-research') return ['Background reading; it cites too few sources to check claim by claim.', 'Context only; never cite it as evidence.'];
-  return ['Internal planning notes; read as opinion, not research.', 'Planning context only; do not retrieve it as evidence.'];
-}
-
 function headingsOf(body) {
   return [...body.matchAll(/^#{1,3}\s+(.+)$/gm)].slice(0, 60).map((m) => m[1]).join(' \n ');
 }
 
-function privacyOf(facts, hits) {
-  if (facts.excludedId) return 'excluded-id';
-  if (hits.has('exclusion')) return 'exclusion-match';
-  return hits.has('denylist') ? 'redacted' : 'ok';
+// ---------------------------------------------------------------------------------------------
+// The registry: pure, so every rule above is testable on synthetic data. Excluded documents are dropped before
+// any row exists, so neither tier can carry them.
+function isWithheld(f, key, { quarantineKeys, redact }) {
+  return f.excludedId || quarantineKeys.has(key) || redact(`${f.title}\n${key}`).hits.has('exclusion');
 }
 
-// ---------------------------------------------------------------------------------------------
-// The registry: pure, so every rule above is testable on synthetic data.
+function reportRow(f, key, text, run, ctx) {
+  const created = Date.parse(f.created);
+  const raw = {
+    row_id: sha256(key).slice(0, 12), key, title: f.title, domain: f.domain, kind: f.kind, source: f.source,
+    created: f.created, age_days: Number.isNaN(created) ? null : Math.max(0, Math.floor((ctx.now - created) / DAY_MS)),
+    producer: f.producer ?? (run ? 'gemini-deep-research' : 'unknown'),
+    producer_mode: f.mode ?? (run ? 'deep-research' : 'unknown'), producer_model: f.model ?? 'unknown',
+    producer_basis: run ? 'usage-ledger' : f.producer ? 'front-matter-classifier' : 'none',
+    ...ledgerColumns(run, ctx),
+    drive_doc_id: f.driveId, drive_doc_url: f.driveId ? `https://drive.google.com/open?id=${encodeURIComponent(f.driveId)}` : null,
+    local_path: `corpus/${key}`, source_urls: f.sourceUrls, source_hosts: f.sourceHosts, evidence: f.evidence, evidence_basis: f.evidenceBasis,
+    ...claimColumns(ctx.claimSets.get(key), f, text),
+  };
+  raw.release_block_count = raw.release_blocks.length;
+  raw.sampled_share = raw.claims_in_report ? +(raw.claims_sampled / raw.claims_in_report).toFixed(3) : null;
+  return Object.assign(raw, scoreColumns(raw, { staleDays: ctx.stale.get(f.domain) ?? DEFAULT_STALE_DAYS, econWeight: ctx.econ[f.domain] ?? 0 }));
+}
+
 export function buildRegistry({
-  reports, ledger = null, claimSets = new Map(), domains = [], local = {}, exclusionIds = new Set(),
+  reports, ledger = null, claimSets = new Map(), domains = [], local = {}, exclusionIds = new Set(), quarantineKeys = new Set(),
   redact = makeRedactor(), now = Date.now(), orphanClaimFiles = [],
 }) {
   const stale = new Map();
   for (const d of domains) if (!stale.has(d.id)) stale.set(d.id, d.staleDays);
+  const knownDomains = new Set([...stale.keys(), 'unrouted']);
   const econ = { ...ECONOMIC_DOMAIN_WEIGHTS, ...(local.economicDomainWeights ?? {}) };
   const { runs, orphanCloses } = ledger ? ledgerRuns(ledger) : { runs: [], orphanCloses: 0 };
   const plan = ledger ? usagePlan(ledger) : null;
-  const ctx = { ledgerPresent: Boolean(ledger), costs: plan?.costs ?? [], runs };
-  const rows = [];
-  const roleRows = [];
+  const ctx = { ledgerPresent: Boolean(ledger), costs: plan?.costs ?? [], runs, now, stale, econ, claimSets };
+  const out = { rows: [], roleRows: [], shareRows: [], shareRoleRows: [] };
   const matched = new Map();
+  let withheld = 0;
   for (const { key, text } of [...reports].sort((a, b) => a.key.localeCompare(b.key))) {
     const f = reportFacts(key, text, exclusionIds);
     const run = matchRun(f, runs);
-    if (run) matched.set(run, key);
-    const created = Date.parse(f.created);
-    const raw = {
-      row_id: sha256(key).slice(0, 12), key, title: f.title, domain: f.domain, kind: f.kind, source: f.source,
-      created: f.created, age_days: Number.isNaN(created) ? null : Math.max(0, Math.floor((now - created) / DAY_MS)),
-      producer: f.producer ?? (run ? 'gemini-deep-research' : 'unknown'),
-      producer_mode: f.mode ?? (run ? 'deep-research' : 'unknown'), producer_model: f.model ?? 'unknown',
-      producer_basis: run ? 'usage-ledger' : f.producer ? 'front-matter-classifier' : 'none',
-      ...ledgerColumns(run, ctx),
-      drive_doc_id: f.driveId, drive_doc_url: f.driveId ? `https://drive.google.com/open?id=${encodeURIComponent(f.driveId)}` : null,
-      local_path: `corpus/${key}`, source_urls: f.sourceUrls, source_hosts: f.sourceHosts, evidence: f.evidence, evidence_basis: f.evidenceBasis,
-      ...claimColumns(claimSets.get(key), f, text),
-    };
-    Object.assign(raw, scoreColumns(raw, { staleDays: stale.get(f.domain) ?? DEFAULT_STALE_DAYS, econWeight: econ[f.domain] ?? 0 }));
+    if (isWithheld(f, key, { quarantineKeys, redact })) {
+      withheld += 1;
+      if (run) matched.set(run, null);
+      continue;
+    }
+    const raw = reportRow(f, key, text, run, ctx);
+    if (run) matched.set(run, raw);
     const relevance = roleRelevance(f.domain, { title: f.title, headings: headingsOf(f.body) }, local.roleDomains);
+    const [human, agent] = readers(raw);
+    const share = shareRow(raw, knownDomains);
+    out.shareRows.push(share);
+    out.shareRoleRows.push({ row_id: share.row_id, domain: share.domain, kind: share.kind, evidence: share.evidence, release: share.release,
+      ...relevance, human_reader: human, agent_reader: agent });
     const { row, hits } = redactRow(raw, redact);
-    row.privacy = privacyOf(f, hits);
-    const [human, agent] = readers(row);
-    rows.push(Object.fromEntries(REPORT_COLUMNS.map((c) => [c, row[c] ?? null])));
-    roleRows.push({ row_id: row.row_id, key: row.key, title: row.title, domain: row.domain, kind: row.kind,
+    row.privacy = hits.has('denylist') ? 'redacted' : 'ok';
+    out.rows.push(Object.fromEntries(PRIVATE_COLUMNS.map((c) => [c, row[c] ?? null])));
+    out.roleRows.push({ row_id: row.row_id, key: row.key, title: row.title, domain: row.domain, kind: row.kind,
       evidence: row.evidence, release: row.release, ...relevance, human_reader: human, agent_reader: agent });
   }
-  const runRows = runs.map((r) => ({ ...r, title: redact(r.title).text, report: matched.has(r) ? redact(matched.get(r), 'redacted').text : null }));
-  const problems = findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles, econ, ledgerPresent: Boolean(ledger) });
-  return { rows, roleRows, runRows, plan, problems, econ };
+  const reportOf = (r, idOf) => (!matched.has(r) ? null : matched.get(r) === null ? TEXT.withheld : idOf(matched.get(r)));
+  const runRows = runs.map((r) => ({ ...r, title: redact(r.title).text, report: reportOf(r, (raw) => redact(raw.key, 'redacted').text) }));
+  const shareRuns = runs.map((r) => ({ title: null, domain: domainOf(r.domain, knownDomains), status: enumOf('ledger_run_status', r.status),
+    started: dateOf(r.started), finished: dateOf(r.finished), report: reportOf(r, (raw) => raw.row_id) }));
+  const problems = findProblems({ rows: out.rows, runRows, orphanCloses, claimSets, orphanClaimFiles, econ, withheld, ledgerPresent: Boolean(ledger) });
+  return { ...out, runRows, shareRuns, plan, problems, econ, withheld, knownDomains };
 }
 
-function findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles, econ, ledgerPresent }) {
+function findProblems({ rows, runRows, orphanCloses, claimSets, orphanClaimFiles, econ, withheld, ledgerPresent }) {
   const count = (pred) => rows.filter(pred).length;
   const sets = [...claimSets.values()].filter((s) => !s.backupOnly);
   const checks = [
-    [sets.filter((s) => !s.error && !s.manifest).length, 'claims file(s) have no sampling manifest, so the gate blocks them until resampled with `verify sample <key> --force`'],
-    [sets.filter((s) => s.error).length, 'claims file(s) could not be read; their reports are blocked'],
-    [count((r) => r.release_blocks.some((b) => b.startsWith('scoring failed'))), 'report(s) could not be scored by the claim gate; they are blocked'],
-    [count((r) => r.ledger_domain && r.ledger_domain !== r.domain), 'ledger-matched report(s) sit in a different corpus domain than the usage-ledger run recorded'],
-    [count((r) => r.cost_basis === 'not-measured'), 'ledger-matched report(s) have no measured cost: another run was open between the readings around it, or a meter reset fell inside'],
-    [runRows.filter((r) => r.status === 'open').length, 'usage-ledger run(s) are still open (no done or abandon record)'],
-    [orphanCloses, 'usage-ledger done/abandon record(s) name a title that matches no run (a typo leaves the real run open)'],
-    [runRows.filter((r) => r.status === 'done' && !r.report).length, 'finished usage-ledger run(s) match no corpus report (not exported yet, or the title changed)'],
-    [count((r) => r.evidence_basis === 'computed-by-registry'), 'report(s) lack evidence fields in front matter; the registry computed them from the body'],
-    [count((r) => r.privacy === 'exclusion-match'), 'report(s) match a private exclusion pattern once separators are normalized; they may not belong in the corpus'],
-    [count((r) => r.privacy === 'excluded-id'), 'report(s) carry an excluded Drive id (quarantine leak)'],
-    [count((r) => r.claims_backup === 'differs'), 'claims file(s) differ from their checked backup'],
-    [count((r) => r.claims_backup === 'backup-only'), 'checked backup(s) have no primary claims file; the gate reads only the primary, so those reports show as unsampled'],
-    [orphanClaimFiles.length, 'claims file(s) name no report in the corpus'],
-    [count((r) => r.release !== 'unsampled' && !(econ[r.domain] > 0)), 'sampled report(s) sit in a domain with no economic weight (for example unrouted) and score 0 on economic relevance'],
-    [ledgerPresent ? 0 : 1, 'no usage ledger was found; run timing and cost columns are blank'],
+    [sets.filter((s) => !s.error && !s.manifest).length, PROBLEMS.noManifest],
+    [sets.filter((s) => s.error).length, PROBLEMS.unreadable],
+    [count((r) => r.release_blocks.some((b) => b.startsWith('scoring failed'))), PROBLEMS.scoringFailed],
+    [count((r) => r.ledger_domain && r.ledger_domain !== r.domain), PROBLEMS.domainDiffers],
+    [count((r) => r.cost_basis === 'not-measured'), PROBLEMS.notMeasured],
+    [runRows.filter((r) => r.status === 'open').length, PROBLEMS.openRuns],
+    [orphanCloses, PROBLEMS.orphanCloses],
+    [runRows.filter((r) => r.status === 'done' && !r.report).length, PROBLEMS.unmatchedRuns],
+    [count((r) => r.evidence_basis === 'computed-by-registry'), PROBLEMS.computedEvidence],
+    [withheld, PROBLEMS.withheld],
+    [count((r) => r.claims_backup === 'differs'), PROBLEMS.backupDiffers],
+    [count((r) => r.claims_backup === 'backup-only'), PROBLEMS.backupOnly],
+    [orphanClaimFiles.length, PROBLEMS.orphanClaims],
+    [count((r) => r.release !== 'unsampled' && !(econ[r.domain] > 0)), PROBLEMS.noEconWeight],
+    [ledgerPresent ? 0 : 1, PROBLEMS.noLedger],
   ];
   return checks.filter(([n]) => n > 0).map(([n, text]) => `${n} ${text}.`);
 }
@@ -474,74 +671,84 @@ export function toCsv(rows, columns) {
   return `${[columns.join(','), ...rows.map((r) => columns.map((c) => csvCell(r[c])).join(','))].join('\n')}\n`;
 }
 
+const fmt = (template, values) => template.replace(/\{(\w+)\}/g, (_, k) => String(values[k]));
 const cell = (v) => (v === null || v === undefined || v === '' ? '' : String(v).replace(/\|/g, '\\|').replace(/\s+/g, ' '));
 const mdTable = (head, rows) => [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...rows.map((r) => `| ${r.map(cell).join(' | ')} |`)];
 const presample = (r) => r.score_source_breadth + r.score_freshness + r.score_economic_relevance;
+const H = TEXT.head;
 
-function summaryLines(rows, runRows) {
+function summaryLines(rows, runRows, withheld, shareable) {
   const n = (pred) => rows.filter(pred).length;
-  return mdTable(['Measure', 'Count'], [
-    ['Reports in the corpus', rows.length],
-    ['Kind deep-research / gemini-canvas / other', `${n((r) => r.kind === 'deep-research')} / ${n((r) => r.kind === 'gemini-canvas')} / ${n((r) => !['deep-research', 'gemini-canvas'].includes(r.kind))}`],
-    ['Evidence cited (at least 10 URLs and 5 hosts)', n((r) => r.evidence === 'cited')],
-    ['Claim-sampled', n((r) => r.release !== 'unsampled')],
-    ['Release pass / blocked / unsampled', `${n((r) => r.release === 'pass')} / ${n((r) => r.release === 'blocked')} / ${n((r) => r.release === 'unsampled')}`],
-    ['Usage-ledger runs / matched to a report / with a measured cost', `${runRows.length} / ${n((r) => r.ledger_run_status)} / ${n((r) => r.cost_basis === 'measured')}`],
-    ['Privacy redacted / exclusion-match / excluded-id', `${n((r) => r.privacy === 'redacted')} / ${n((r) => r.privacy === 'exclusion-match')} / ${n((r) => r.privacy === 'excluded-id')}`],
+  const S = TEXT.summary;
+  return mdTable([H.measure, H.count], [
+    [S.reports, rows.length],
+    [S.kinds, `${n((r) => r.kind === 'deep-research')} / ${n((r) => r.kind === 'gemini-canvas')} / ${n((r) => !['deep-research', 'gemini-canvas'].includes(r.kind))}`],
+    [S.cited, n((r) => r.evidence === 'cited')],
+    [S.sampled, n((r) => r.release !== 'unsampled')],
+    [S.release, `${n((r) => r.release === 'pass')} / ${n((r) => r.release === 'blocked')} / ${n((r) => r.release === 'unsampled')}`],
+    [S.ledger, `${runRows.length} / ${n((r) => r.ledger_run_status)} / ${n((r) => r.cost_basis === 'measured')}`],
+    [S.withheld, withheld],
+    ...(shareable ? [] : [[S.redacted, n((r) => r.privacy === 'redacted')]]),
   ]);
 }
 
 function weightLines(econ, localKeys) {
   const domainList = Object.entries(econ).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([d, w]) => `${d} ${w}${localKeys.has(d) ? ' (local)' : ''}`).join(' · ');
+    .map(([d, w]) => `${d} ${w}${localKeys.has(d) ? ` ${TEXT.local}` : ''}`).join('; ');
+  const C = TEXT.component;
+  const R = TEXT.rule;
   return [
-    ...mdTable(['Component', 'Max', 'Rule'], [
-      ['Evidence integrity', WEIGHTS.evidenceIntegrity, `verified ÷ checked × min(1, checked ÷ min(${SAMPLE_FOR_FULL_CREDIT}, claims in report)); blank when unsampled. Claims in report = every claim in any extraction mode (table and cited prose)`],
-      ['Source breadth', WEIGHTS.sourceBreadth, `min(1, distinct cited hosts ÷ ${HOSTS_FOR_FULL_CREDIT})`],
-      ['Freshness', WEIGHTS.freshness, `full inside the domain's refresh window (staleDays, default ${DEFAULT_STALE_DAYS}), then linear to 0 over ${FRESHNESS_DECAY_WINDOWS} more windows`],
-      ['Verification coverage', WEIGHTS.verificationCoverage, 'min(1, checked claims ÷ claims in report across all extraction modes); blank when unsampled'],
-      ['Economic relevance', WEIGHTS.economicRelevance, 'domain weight × max; set only by the table below, never by keywords'],
+    ...mdTable([H.component, H.max, H.rule], [
+      [C.integrity, WEIGHTS.evidenceIntegrity, fmt(R.integrity, { s: SAMPLE_FOR_FULL_CREDIT })],
+      [C.breadth, WEIGHTS.sourceBreadth, fmt(R.breadth, { h: HOSTS_FOR_FULL_CREDIT })],
+      [C.freshness, WEIGHTS.freshness, fmt(R.freshness, { d: DEFAULT_STALE_DAYS, w: FRESHNESS_DECAY_WINDOWS })],
+      [C.coverage, WEIGHTS.verificationCoverage, R.coverage],
+      [C.economic, WEIGHTS.economicRelevance, R.economic],
     ]),
-    '', `Economic domain weights: ${domainList}. Unlisted domains weigh 0.`,
+    '', fmt(TEXT.econ, { list: domainList }),
   ];
 }
 
-function ledgerLines(runRows, plan, ledgerPresent) {
-  if (!ledgerPresent) return ['No usage ledger was found, so run timing and cost columns are blank.'];
-  const mean = (x) => (x === null || x === undefined ? 'n/a' : `${+x.toFixed(1)}%`);
+function ledgerLines(runRows, plan, ledgerPresent, shareable) {
+  if (!ledgerPresent) return [TEXT.noLedger];
+  const mean = (x) => (x === null || x === undefined ? TEXT.na : `${+x.toFixed(1)}%`);
+  const head = [...(shareable ? [] : [H.runTitle]), H.ledgerDomain, H.status, H.started, H.finished, H.matched];
   return [
-    `Measured runs: ${plan.measuredRuns}. Mean cost per measured run: window ${mean(plan.sessionPerRun)}, weekly ${mean(plan.weeklyPerRun)}. A run is measured only when it is the only run between the readings around it and no meter reset falls inside (rules: README, "Gemini usage").`, '',
-    ...mdTable(['Run title', 'Ledger domain', 'Status', 'Started', 'Finished', 'Matched report'],
-      runRows.map((r) => [r.title, r.domain, r.status, r.started, r.finished ?? '', r.report ?? ''])),
+    fmt(TEXT.measured, { n: plan.measuredRuns, s: mean(plan.sessionPerRun), w: mean(plan.weeklyPerRun) }), '',
+    ...mdTable(head, runRows.map((r) => [...(shareable ? [] : [r.title]), r.domain, r.status, r.started, r.finished ?? '', r.report ?? ''])),
   ];
 }
 
-export function registryMarkdown({ rows, runRows, plan, problems, econ, localKeys = new Set(), builtAt, redaction, ledgerPresent, roleRows }) {
-  const ranked = rows.filter((r) => r.release !== 'unsampled').sort((a, b) => b.rank_score - a.rank_score || a.key.localeCompare(b.key));
-  const queue = rows.filter((r) => r.release === 'unsampled' && r.evidence === 'cited').sort((a, b) => presample(b) - presample(a) || a.key.localeCompare(b.key));
+// One renderer for both tiers. The shareable tier passes its own rows, runs and role rows only, and names each
+// report by its opaque id; the private tier names it by corpus key.
+export function registryMarkdown({ tier, rows, roleRows, runRows, plan, problems, econ, localKeys = new Set(), builtAt, withheld, nameCheck, ledgerPresent }) {
+  const shareable = tier === 'shareable';
+  const id = (r) => (shareable ? r.row_id : r.key);
+  const byId = (a, b) => String(id(a)).localeCompare(String(id(b)));
+  const ranked = rows.filter((r) => r.release !== 'unsampled').sort((a, b) => b.rank_score - a.rank_score || byId(a, b));
+  const queue = rows.filter((r) => r.release === 'unsampled' && r.evidence === 'cited').sort((a, b) => presample(b) - presample(a) || byId(a, b));
   const roleCounts = Object.keys(ROLES).map((role) => [role, roleRows.filter((r) => r[role] >= 2).length, roleRows.filter((r) => r[role] === 3).length]);
-  const byRelease = { pass: 0, blocked: 1, unsampled: 2 };
-  const all = [...rows].sort((a, b) => byRelease[a.release] - byRelease[b.release] || a.key.localeCompare(b.key));
+  const order = { pass: 0, blocked: 1, unsampled: 2 };
+  const all = [...rows].sort((a, b) => (order[a.release] ?? 3) - (order[b.release] ?? 3) || byId(a, b));
   return [
-    '# Research registry', '',
-    '> **Weights are hypotheses.** The rank score only orders what to review next; it never releases a report. Release comes only from the claim gate (`node corpus.mjs verify score <key>`): `pass` or `blocked`. A report with no claim records is `unsampled`, and its rank is `unranked`.', '',
-    `Built ${builtAt} from ${rows.length} corpus reports. Paths are relative to RESEARCH_HOME. reports.csv and reports.jsonl hold every column; roles.csv holds the role relevance matrix; all three share \`row_id\`.`, '',
-    redaction, '',
-    '## Summary', '', ...summaryLines(rows, runRows), '',
-    '## Weights (hypotheses)', '', ...weightLines(econ, localKeys), '',
-    '## Ranked: claim-sampled reports', '',
-    ...mdTable(['Rank', 'Key', 'Domain', 'Release', 'Verified / checked / in report', 'Integrity', 'Breadth', 'Fresh', 'Coverage', 'Econ', 'Blocks'],
-      ranked.map((r) => [r.rank_score, r.key, r.domain, r.release, `${r.claims_verified ?? 0} / ${r.claims_checked ?? 0} / ${r.claims_in_report ?? '?'}`,
-        r.score_evidence_integrity, r.score_source_breadth, r.score_freshness, r.score_verification_coverage, r.score_economic_relevance, r.release_blocks.length])), '',
-    '## Next to sample: unsampled reports with cited evidence', '',
-    'Ordered by the three sub-scores that need no claim checks (breadth, freshness, economic relevance). This is a sampling queue, not a rank.', '',
-    ...mdTable(['Key', 'Domain', 'Kind', 'Hosts', 'Breadth', 'Fresh', 'Econ'],
-      queue.map((r) => [r.key, r.domain, r.kind, r.source_hosts, r.score_source_breadth, r.score_freshness, r.score_economic_relevance])), '',
-    '## Gemini usage ledger', '', ...ledgerLines(runRows, plan, ledgerPresent), '',
-    '## Problems found', '', ...(problems.length ? problems.map((p) => `- ${p}`) : ['- None.']), '',
-    '## Roles: reports at relevance 2 or more', '', ...mdTable(['Role', 'Relevance ≥ 2', 'Relevance 3'], roleCounts), '',
-    '## All reports', '',
-    ...mdTable(['Key', 'Kind', 'Domain', 'Evidence', 'Release', 'Rank'], all.map((r) => [r.key, r.kind, r.domain, r.evidence, r.release, r.rank_score])), '',
+    shareable ? TEXT.headShare : TEXT.headPrivate, '', shareable ? TEXT.noteShare : TEXT.notePrivate, '', TEXT.hypotheses, '',
+    `${fmt(TEXT.built, { at: builtAt, n: rows.length, w: withheld })}${shareable ? '' : ` ${TEXT.paths}`}`, '',
+    nameCheck, '',
+    TEXT.hSummary, '', ...summaryLines(rows, runRows, withheld, shareable), '',
+    TEXT.hWeights, '', ...weightLines(econ, localKeys), '',
+    TEXT.hRanked, '',
+    ...mdTable([H.rank, H.report, H.domain, H.release, H.vci, H.share, H.integrity, H.breadth, H.fresh, H.coverage, H.econ, H.blocks],
+      ranked.map((r) => [r.rank_score, id(r), r.domain, r.release, `${r.claims_verified ?? 0} / ${r.claims_checked ?? 0} / ${r.claims_in_report ?? TEXT.na}`,
+        r.sampled_share, r.score_evidence_integrity, r.score_source_breadth, r.score_freshness, r.score_verification_coverage, r.score_economic_relevance,
+        r.release_block_count])), '',
+    TEXT.hQueue, '', TEXT.queueNote, '',
+    ...mdTable([H.report, H.domain, H.kind, H.hosts, H.breadth, H.fresh, H.econ],
+      queue.map((r) => [id(r), r.domain, r.kind, r.source_hosts, r.score_source_breadth, r.score_freshness, r.score_economic_relevance])), '',
+    TEXT.hLedger, '', ...ledgerLines(runRows, plan, ledgerPresent, shareable), '',
+    TEXT.hProblems, '', ...(problems.length ? problems.map((p) => `- ${p}`) : [TEXT.none]), '',
+    TEXT.hRoles, '', ...mdTable([H.role, H.rel2, H.rel3], roleCounts), '',
+    TEXT.hAll, '',
+    ...mdTable([H.report, H.kind, H.domain, H.evidence, H.release, H.rank], all.map((r) => [id(r), r.kind, r.domain, r.evidence, r.release, r.rank_score])), '',
   ].join('\n');
 }
 
@@ -576,6 +783,7 @@ function listMarkdown(dir) {
   });
 }
 
+const keysUnder = (dir) => listMarkdown(dir).map((file) => path.relative(dir, file).split(path.sep).join('/'));
 const stemOf = (key) => key.replace(/\.md$/, '').split('/').join('__');
 
 // The same files `verify score` reads: <stem>.claims.jsonl and <stem>.manifest.json. The checked backup is
@@ -599,9 +807,7 @@ function readClaimSet(verifyDir, key) {
 export function loadHome(home) {
   const corpusDir = path.join(home, 'corpus');
   const verifyDir = path.join(home, 'verify');
-  const reports = listMarkdown(corpusDir).map((file) => ({
-    key: path.relative(corpusDir, file).split(path.sep).join('/'), text: readFileSync(file, 'utf8'),
-  }));
+  const reports = keysUnder(corpusDir).map((key) => ({ key, text: readFileSync(path.join(corpusDir, ...key.split('/')), 'utf8') }));
   const claimSets = new Map();
   for (const { key } of reports) {
     const set = readClaimSet(verifyDir, key);
@@ -618,6 +824,7 @@ export function loadHome(home) {
     domains: [...readJson(path.join(home, 'domains.local.json'), { domains: [] }).domains, ...readJson(path.join(HERE, 'domains.json'), { domains: [] }).domains],
     local: readJson(path.join(home, 'registry', 'weights.local.json'), {}),
     exclusionIds: new Set(readLines(path.join(home, 'exclude-ids.txt'))),
+    quarantineKeys: new Set(keysUnder(path.join(home, 'quarantine'))),
     exclusionPhrases: readLines(path.join(home, 'exclude.txt')),
     denylist: existsSync(redactFile) ? parseRedactList(readFileSync(redactFile, 'utf8')) : null,
     redactFile,
@@ -631,28 +838,52 @@ function writeAtomic(file, text) {
   renameSync(tmp, file);
 }
 
+// Builds before this layout wrote the private files to registry/ itself; they are removed so no stale private
+// copy sits where people look for something to share.
+const LEGACY_OUTPUTS = ['reports.csv', 'reports.jsonl', 'roles.csv', 'REGISTRY.md'];
+
+function tierFiles(tier, { rows, roleRows, columns, roleColumns, markdown }) {
+  return {
+    [`${tier}/reports.csv`]: toCsv(rows, columns),
+    [`${tier}/reports.jsonl`]: `${rows.map((r) => JSON.stringify(r)).join('\n')}${rows.length ? '\n' : ''}`,
+    [`${tier}/roles.csv`]: toCsv(roleRows, roleColumns),
+    [`${tier}/REGISTRY.md`]: markdown,
+  };
+}
+
 export function runBuild({ home, allowUnredacted = false, now = Date.now() }) {
   const input = loadHome(home);
   if (!input.denylist && !allowUnredacted) {
-    throw new Error(`no redaction list at ${input.redactFile}: outputs could name people. Add hashes with "node registry.mjs redact-hash", or pass --allow-unredacted`);
+    throw new Error(`no redaction list at ${input.redactFile}: the private tier could name people. Add hashes with "node registry.mjs redact-hash", or pass --allow-unredacted`);
   }
   const redact = makeRedactor({ entries: input.denylist ?? [], phrases: input.exclusionPhrases });
   const reg = buildRegistry({ ...input, redact, now });
-  const redaction = input.denylist
-    ? `Share-check: every output was scanned against ${input.denylist.length} hashed name phrase(s) and ${input.exclusionPhrases.length} private exclusion pattern(s) before writing; a hit stops the build and writes nothing. Matches are shown as [redacted].`
-    : '**Not checked for personal names:** built with --allow-unredacted and no redaction list. Do not share.';
+  const common = { plan: reg.plan, problems: reg.problems, econ: reg.econ, builtAt: new Date(now).toISOString(), withheld: reg.withheld,
+    ledgerPresent: Boolean(input.ledger), localKeys: new Set(Object.keys(input.local.economicDomainWeights ?? {})) };
+  const privateCheck = input.denylist
+    ? fmt(TEXT.checkedPrivate, { d: input.denylist.length, p: input.exclusionPhrases.length }) : TEXT.uncheckedPrivate;
   const files = {
-    'reports.csv': toCsv(reg.rows, REPORT_COLUMNS),
-    'reports.jsonl': `${reg.rows.map((r) => JSON.stringify(r)).join('\n')}\n`,
-    'roles.csv': toCsv(reg.roleRows, ROLE_COLUMNS),
-    'REGISTRY.md': registryMarkdown({ ...reg, builtAt: new Date(now).toISOString(), redaction, ledgerPresent: Boolean(input.ledger),
-      localKeys: new Set(Object.keys(input.local.economicDomainWeights ?? {})) }),
+    ...tierFiles('shareable', { rows: reg.shareRows, roleRows: reg.shareRoleRows, columns: SHARE_COLUMNS, roleColumns: SHARE_ROLE_COLUMNS,
+      markdown: registryMarkdown({ ...common, tier: 'shareable', rows: reg.shareRows, roleRows: reg.shareRoleRows, runRows: reg.shareRuns, nameCheck: TEXT.checkedShare }) }),
+    ...tierFiles('private', { rows: reg.rows, roleRows: reg.roleRows, columns: PRIVATE_COLUMNS, roleColumns: PRIVATE_ROLE_COLUMNS,
+      markdown: registryMarkdown({ ...common, tier: 'private', rows: reg.rows, roleRows: reg.roleRows, runRows: reg.runRows, nameCheck: privateCheck }) }),
   };
-  const leaks = Object.entries(files).filter(([, text]) => redact(text).hits.size).map(([name]) => name);
-  if (leaks.length) throw new Error(`share-check failed: ${leaks.join(', ')} still match the redaction list; nothing was written`);
+  const vocabulary = shareVocabulary(reg.knownDomains, Object.keys(reg.econ));
+  const refused = Object.entries(files).flatMap(([name, text]) => {
+    const why = [];
+    if (redact(text).hits.size) why.push('matches the redaction list');
+    if (name.startsWith('shareable/')) {
+      const scan = shareableScan(text, vocabulary);
+      if (scan.nonAscii) why.push(`${scan.nonAscii} non-ASCII character(s)`);
+      if (scan.unknownWords) why.push(`${scan.unknownWords} word(s) outside the registry vocabulary`);
+    }
+    return why.length ? [`${name}: ${why.join(', ')}`] : [];
+  });
+  if (refused.length) throw new Error(`share-check failed, nothing was written: ${refused.join('; ')}`);
   const dir = path.join(home, 'registry');
-  for (const [name, text] of Object.entries(files)) writeAtomic(path.join(dir, name), text);
-  return { dir, files: Object.keys(files), reports: reg.rows.length, problems: reg.problems };
+  for (const [name, text] of Object.entries(files)) writeAtomic(path.join(dir, ...name.split('/')), text);
+  for (const name of LEGACY_OUTPUTS) rmSync(path.join(dir, name), { force: true });
+  return { dir, files: Object.keys(files), reports: reg.rows.length, withheld: reg.withheld, problems: reg.problems };
 }
 
 function flag(name) {
@@ -665,7 +896,7 @@ function main() {
   const cmd = process.argv[2];
   if (cmd === 'build') {
     const out = runBuild({ home, allowUnredacted: process.argv.includes('--allow-unredacted') });
-    console.log(JSON.stringify({ dir: out.dir, files: out.files, reports: out.reports, problems: out.problems.length }, null, 2));
+    console.log(JSON.stringify({ dir: out.dir, files: out.files, reports: out.reports, withheld: out.withheld, problems: out.problems.length }, null, 2));
     return;
   }
   if (cmd === 'redact-hash') {
