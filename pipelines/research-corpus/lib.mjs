@@ -127,6 +127,14 @@ export function corpusKey(entry) {
   return `${entry.domain}/${entry.createdTime.slice(0, 10)}-${slugify(entry.title)}.md`;
 }
 
+// A Drive export goes stale once its key leaves the included inventory: the doc was excluded,
+// re-routed to another domain, renamed or removed in Drive. Push only ever adds, so without this
+// the search index keeps serving it.
+export function staleDriveKeys({ driveKeys, inventory }) {
+  const wanted = new Set(inventory.filter((e) => e.include).map(corpusKey));
+  return driveKeys.filter((k) => !wanted.has(k)).sort();
+}
+
 export function dueDomains(inventory, domains, now = Date.now()) {
   return domains
     .map((d) => {
