@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
   localFrontMatter, slugify, usageToday, usagePlan, evidenceStats, chunkMarkdown, bm25Rank,
-  extractClaims, sampleClaims, claimRecords, scoreClaims, claimChecklist, pipelineHealth, openRunFor, reportDigest,
+  drawSample, scoreClaims, claimChecklist, pipelineHealth, openRunFor,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -513,15 +513,18 @@ function cmdVerify() {
     die('usage: verify sample <corpus-key> [--n 10] [--seed 1] [--from auto|table|prose|all] [--force] | verify score <corpus-key|claims.jsonl>');
   }
   if (sub === 'score') {
-    const claimsFile = target.endsWith('.jsonl') ? path.resolve(target) : claimsFileFor(corpusFile(target).key ?? die(`${target} is outside the corpus`));
+    const explicit = target.endsWith('.jsonl');
+    const requested = explicit ? null : (corpusFile(target).key ?? die(`${target} is outside the corpus`));
+    const claimsFile = explicit ? path.resolve(target) : claimsFileFor(requested);
     if (!existsSync(claimsFile)) die(`no claims file at ${claimsFile}; run "verify sample" first`);
     const records = readJsonl(claimsFile);
-    // The report is read again, so a verdict never outlives the text it was drawn from.
-    const report = records[0]?.report_key ? corpusFile(records[0].report_key) : { inside: false };
-    const digest = report.inside && existsSync(report.file) ? reportDigest(readFileSync(report.file, 'utf8')) : null;
+    // The report asked about (for an explicit file, the one its first record names) is read again,
+    // and scoreClaims requires every record to name it, so a verdict never describes other text.
+    const report = corpusFile(requested ?? String(records[0]?.report_key ?? ''));
+    const reportText = report.inside && existsSync(report.file) ? readFileSync(report.file, 'utf8') : null;
     for (const r of records) console.log(`${String(r.status ?? 'pending').padEnd(12)} ${String(r.source_url ?? 'no-url').replace(/^https?:\/\//, '').slice(0, 70)}`);
-    const score = scoreClaims(records, { reportDigest: digest });
-    console.log(JSON.stringify({ file: claimsFile, report: report.key ?? null, ...score }, null, 2));
+    const score = scoreClaims(records, { reportKey: report.key, reportText });
+    console.log(JSON.stringify({ file: claimsFile, report: report.key, ...score }, null, 2));
     // A shell gate (`verify score x && publish`) must stop on a blocked release.
     if (score.release !== 'pass') process.exit(1);
     return;
@@ -536,16 +539,14 @@ function cmdVerify() {
   if (existsSync(claimsFile) && !has('force') && readJsonl(claimsFile).some((r) => r.status !== 'pending')) {
     die(`${claimsFile} already holds checked claims; pass --force to resample and overwrite them`);
   }
-  const text = readFileSync(reportFile, 'utf8');
-  const claims = extractClaims(text, { from });
-  if (!claims.length) die(`no claims with a source found in ${key}`);
   const seed = Number(flag('seed') || 1);
-  const records = claimRecords(sampleClaims(claims, Number(flag('n') || 10), seed),
-    { reportKey: key, sampledAt: new Date().toISOString(), seed, reportSha256: reportDigest(text) });
+  const { claimsInReport, records } = drawSample(readFileSync(reportFile, 'utf8'),
+    { reportKey: key, n: Number(flag('n') || 10), seed, from, sampledAt: new Date().toISOString() });
+  if (!claimsInReport) die(`no claims with a source found in ${key}`);
   writeAtomic(claimsFile, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
   const checklist = claimsFile.replace(/\.claims\.jsonl$/, '.checklist.md');
-  writeAtomic(checklist, claimChecklist(records, { reportKey: key, claimsInReport: claims.length }));
-  console.log(JSON.stringify({ report: key, claimsInReport: claims.length, sampled: records.length, seed, claimsFile, checklist,
+  writeAtomic(checklist, claimChecklist(records, { reportKey: key, claimsInReport }));
+  console.log(JSON.stringify({ report: key, claimsInReport, sampled: records.length, seed, claimsFile, checklist,
     signals: records.flatMap((r) => r.signals).reduce((a, s) => ((a[s] = (a[s] ?? 0) + 1), a), {}) }, null, 2));
 }
 

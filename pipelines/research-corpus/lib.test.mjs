@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   briefMarkdown, catalogMarkdown, classify, classifyKind, evidenceStats, chunkMarkdown, bm25Rank, corpusKey, dueDomains, frontMatter,
   localFrontMatter, routeDomain, usageToday, usagePlan, parseWorksCited, splitCitations, extractClaims, sampleClaims, claimRecords,
-  scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, CLAIM_SCHEMA,
+  scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, drawSample, CLAIM_SCHEMA,
 } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
@@ -225,9 +225,15 @@ const REPORT = [
   String.raw`> 1. Pricing \- Trigger, [https\://trigger.dev/pricing](https://trigger.dev/pricing)  `,
   String.raw`> 2. AI SDK 7 is now available \| Vercel, [https\://vercel.com/blog/ai-sdk-7](https://vercel.com/blog/ai-sdk-7)  `,
 ].join('\n');
-const DIGEST = reportDigest(REPORT);
 // What a checker writes beside a status (synthetic).
 const EVIDENCE = { excerpt: 'verbatim source text', checked_at: '2026-11-04T12:00:00Z', checker: 'independent-checker' };
+// A synthetic report with n table claims, each citing its own source.
+const tableReport = (n) => ['---', 'title: "T"', 'kind: deep-research', '---', '# T', '',
+  '| Category | Claim | Source URL |', '| :-- | :-- | :-- |',
+  ...Array.from({ length: n }, (_, i) => `| c${i % 3} | Synthetic fact number ${i} holds. | https://source${i}.example/page |`), ''].join('\n');
+// The records `verify sample` writes for a report under d/r.md, and the gate `verify score` applies.
+const sampleOf = (text, n = 10) => drawSample(text, { reportKey: 'd/r.md', n, seed: 1, sampledAt: 'now' }).records;
+const scoreOf = (records, text = REPORT) => scoreClaims(records, { reportKey: 'd/r.md', reportText: text });
 
 test('parseWorksCited reads numbered entries with escaped titles and link targets', () => {
   const refs = parseWorksCited(REPORT);
@@ -285,20 +291,21 @@ test('sampleClaims is reproducible for a seed and spreads the sample across cate
 });
 
 test('claim records start pending with the evidence fields; scoreClaims blocks release until they pass', () => {
-  const records = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST });
+  const records = sampleOf(REPORT);
   assert.equal(records[0].schema, CLAIM_SCHEMA);
-  for (const f of ['claim', 'source_url', 'excerpt', 'source_date', 'status', 'contradictions', 'report_sha256']) assert.ok(f in records[0], f);
-  assert.equal(scoreClaims(records, { reportDigest: DIGEST }).release, 'blocked');
-  // Distinct ids: a repeated record is padding, not a checked claim.
-  const done = (statuses) => statuses.map((status, i) => ({ ...records[i % records.length], ...EVIDENCE, id: `d/r.md#${i}`, status }));
-  const score = (statuses) => scoreClaims(done(statuses), { reportDigest: DIGEST });
+  for (const f of ['claim', 'source_url', 'excerpt', 'source_date', 'status', 'contradictions', 'report_sha256', 'sample_from']) assert.ok(f in records[0], f);
+  assert.equal(scoreOf(records).release, 'blocked');
+  // Four distinct claims, so one unreachable source stays under the 30% limit.
+  const four = tableReport(4);
+  const sample = sampleOf(four);
+  const score = (statuses) => scoreOf(sample.map((r, i) => ({ ...r, ...EVIDENCE, status: statuses[i] })), four);
   const pass = score(['verified', 'partial', 'verified', 'unreachable']);
   assert.equal(pass.release, 'pass');
   assert.equal(pass.checked, 3, 'unreachable sources are not counted as checked');
   assert.equal(pass.verifiedRate, 0.667);
   assert.equal(pass.supportedRate, 1);
-  assert.equal(score(['verified', 'unreachable', 'unreachable']).release, 'blocked', 'too few reachable sources to judge');
-  const bad = score(['verified', 'contradicted', 'garbled']);
+  assert.equal(score(['verified', 'unreachable', 'unreachable', 'verified']).release, 'blocked', 'too few reachable sources to judge');
+  const bad = score(['verified', 'contradicted', 'garbled', 'verified']);
   assert.equal(bad.release, 'blocked');
   assert.equal(bad.blocks.length, 2);
 });
@@ -386,11 +393,10 @@ test('versioned names at the end of a clause are not read as citations', () => {
 });
 
 test('an emptied or trimmed claims file cannot pass the release gate', () => {
-  const recs = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST })
-    .map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
-  assert.equal(scoreClaims(recs, { reportDigest: DIGEST }).release, 'pass');
-  assert.equal(scoreClaims([], { reportDigest: DIGEST }).release, 'blocked');
-  assert.match(scoreClaims(recs.slice(0, 2), { reportDigest: DIGEST }).blocks[0], /1 sampled record\(s\) missing/);
+  const recs = sampleOf(REPORT).map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
+  assert.equal(scoreOf(recs).release, 'pass');
+  assert.equal(scoreOf([]).release, 'blocked');
+  assert.match(scoreOf(recs.slice(0, 2)).blocks[0], /1 sampled record\(s\) missing/);
 });
 
 test('a scheduled run left "running" past the scheduler limit fails the doctor', () => {
@@ -416,16 +422,22 @@ function sandbox(t) {
   return { home, cwd, env, cli };
 }
 
-function sampledReport(t) {
-  const box = sandbox(t);
-  const report = path.join(box.home, 'corpus', 'd', 'r.md');
+// Writes a report under `key`, samples it through the CLI, and returns ways to rewrite its claims file.
+function sampleIn(box, key, text, n = 3) {
+  const report = path.join(box.home, 'corpus', ...key.split('/'));
   mkdirSync(path.dirname(report), { recursive: true });
-  writeFileSync(report, REPORT);
-  assert.equal(box.cli('verify', 'sample', 'd/r.md', '--n', '3').status, 0);
-  const claimsFile = path.join(box.home, 'verify', 'd__r.claims.jsonl');
+  writeFileSync(report, text);
+  assert.equal(box.cli('verify', 'sample', key, '--n', String(n)).status, 0);
+  const claimsFile = path.join(box.home, 'verify', `${key.replace(/\.md$/, '').split('/').join('__')}.claims.jsonl`);
   const sampled = readFileSync(claimsFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  const fill = (status) => writeFileSync(claimsFile, sampled.map((r) => JSON.stringify({ ...r, ...EVIDENCE, status })).join('\n') + '\n');
-  return { ...box, report, fill };
+  const write = (rows) => writeFileSync(claimsFile, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const fill = (status) => write(sampled.map((r) => ({ ...r, ...EVIDENCE, status })));
+  return { report, claimsFile, sampled, write, fill };
+}
+
+function sampledReport(t, text = REPORT, n = 3) {
+  const box = sandbox(t);
+  return { ...box, ...sampleIn(box, 'd/r.md', text, n) };
 }
 
 test('verify sample writes only under RESEARCH_HOME, even when given a .jsonl corpus key', (t) => {
@@ -437,8 +449,8 @@ test('verify sample writes only under RESEARCH_HOME, even when given a .jsonl co
 });
 
 test('a checked status without its evidence cannot pass the release gate', () => {
-  const recs = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST });
-  const gate = (patch) => scoreClaims(recs.map((r) => ({ ...r, ...patch })), { reportDigest: DIGEST });
+  const recs = sampleOf(REPORT);
+  const gate = (patch) => scoreOf(recs.map((r) => ({ ...r, ...patch })));
   const bare = gate({ status: 'verified' });
   assert.equal(bare.release, 'blocked');
   assert.match(bare.blocks.join(' '), /3 checked claim\(s\) lack evidence/);
@@ -449,16 +461,16 @@ test('a checked status without its evidence cannot pass the release gate', () =>
 });
 
 test('duplicate records neither complete a sample nor dilute its failure share', () => {
-  const [one] = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1, reportSha256: DIGEST });
-  const verified = { ...one, ...EVIDENCE, status: 'verified', sample_size: 10 };
-  const padded = scoreClaims(Array.from({ length: 10 }, () => verified), { reportDigest: DIGEST });
+  const [one] = sampleOf(REPORT);
+  const verified = { ...one, ...EVIDENCE, status: 'verified' };
+  const padded = scoreOf(Array.from({ length: 10 }, () => verified));
   assert.equal(padded.release, 'blocked');
-  assert.match(padded.blocks.join(' '), /9 sampled record\(s\) missing/);
+  assert.match(padded.blocks.join(' '), /2 sampled record\(s\) missing/);
   assert.match(padded.blocks.join(' '), /9 duplicate record\(s\)/);
   // Five distinct claims, two unsupported (40%), padded with copies of a verified one (2/13 = 15%).
-  const five = ['verified', 'verified', 'verified', 'unsupported', 'unsupported']
-    .map((status, i) => ({ ...one, ...EVIDENCE, id: `d/r.md#${i}`, sample_size: 5, status }));
-  assert.equal(scoreClaims([...five, ...Array.from({ length: 8 }, () => five[0])], { reportDigest: DIGEST }).release, 'blocked');
+  const text = tableReport(5);
+  const five = sampleOf(text).map((r, i) => ({ ...r, ...EVIDENCE, status: i < 3 ? 'verified' : 'unsupported' }));
+  assert.equal(scoreOf([...five, ...Array.from({ length: 8 }, () => five[0])], text).release, 'blocked');
 });
 
 test('a verdict does not outlive its report: a changed body or a deleted report blocks the score', (t) => {
@@ -477,7 +489,7 @@ test('a verdict does not outlive its report: a changed body or a deleted report 
   assert.match(gone.stdout, /report is missing from the corpus/);
   // The pure gate holds the same rule for any caller.
   const recs = claimRecords(extractClaims(REPORT), { reportKey: 'd/r.md', sampledAt: 'now', seed: 1 }).map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
-  assert.equal(scoreClaims(recs, { reportDigest: DIGEST }).release, 'blocked', 'a sample without a digest cannot be tied to the report');
+  assert.equal(scoreOf(recs).release, 'blocked', 'a sample without a digest cannot be tied to the report');
 });
 
 test('verify score exits 1 when the release is blocked, so a shell gate stops', (t) => {
@@ -580,4 +592,94 @@ test('an invocation skipped on the lock keeps the running record, so doctor stil
   assert.deepEqual(lastRun, running);
   const doctor = pipelineHealth({ now: Date.parse('2026-11-05T09:00:00Z'), lastRun }).findings.find((f) => f.check === 'last-run');
   assert.equal(doctor.level, 'fail');
+});
+
+// Regressions from the cross-family review of a5afa26.
+test('a claims file must hold the sample redrawn from the report: no copied rows, no lowered size', (t) => {
+  const { sampled, write, cli } = sampledReport(t);
+  const verified = sampled.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' }));
+  write(verified);
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
+  // One verified row copied over the others, each keeping its own id.
+  write(verified.map((r) => ({ ...verified[0], id: r.id })));
+  const copied = cli('verify', 'score', 'd/r.md');
+  assert.equal(copied.status, 1);
+  assert.match(copied.stdout, /2 record\(s\) differ from the sample redrawn from the report/);
+  // A trimmed file that lowers sample_size to match.
+  write([{ ...verified[0], sample_size: 1 }]);
+  const trimmed = cli('verify', 'score', 'd/r.md');
+  assert.equal(trimmed.status, 1);
+  assert.match(trimmed.stdout, /below the release minimum of 3/);
+});
+
+test('verify score <key> judges only that report, never a sidecar describing another one', (t) => {
+  const box = sandbox(t);
+  const a = sampleIn(box, 'd/a.md', REPORT);
+  const b = sampleIn(box, 'd/b.md', tableReport(3));
+  b.fill('verified');
+  assert.equal(box.cli('verify', 'score', 'd/b.md').status, 0);
+  writeFileSync(a.claimsFile, readFileSync(b.claimsFile));
+  const swapped = box.cli('verify', 'score', 'd/a.md');
+  assert.equal(swapped.status, 1);
+  assert.match(swapped.stdout, /describe a report other than d\/a\.md/);
+  rmSync(a.report);
+  assert.equal(box.cli('verify', 'score', 'd/a.md').status, 1, 'with A deleted, B\'s verdict still does not pass for A');
+});
+
+test('the report digest covers provenance front matter and exempts only pipeline timestamps', (t) => {
+  const withProvenance = REPORT.replace('kind: deep-research', 'kind: deep-research\nsource_id: drive-file-1\nverification: unverified-ai-synthesis\nexported: 2026-11-04T00:00:00Z');
+  const { report, fill, cli } = sampledReport(t, withProvenance);
+  fill('verified');
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
+  writeFileSync(report, withProvenance.replace('verification: unverified-ai-synthesis', 'verification: measured-from-provider-api'));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 1, 'a changed trust label invalidates the verdict');
+  writeFileSync(report, withProvenance.replace('source_id: drive-file-1', 'source_id: drive-file-2'));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 1, 'a different source document invalidates the verdict');
+  writeFileSync(report, withProvenance.replace('exported: 2026-11-04T00:00:00Z', 'exported: 2026-11-05T00:00:00Z'));
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0, 'a re-export timestamp alone does not');
+  assert.equal(reportDigest(withProvenance.replace('kind: deep-research', 'kind: gemini-canvas')) === reportDigest(withProvenance), false);
+});
+
+test('a verified, partial or contradicted verdict needs a source the report cites', (t) => {
+  // A fourth table row with no URL and no citation number: extracted, flagged no-source.
+  const unsourced = REPORT.replace('\n\n#### **Works cited**', '\n| **Runtimes** | Agents never need a source. |  | 2026 |\n\n#### **Works cited**');
+  const { sampled, write, cli } = sampledReport(t, unsourced, 4);
+  assert.ok(sampled.some((r) => r.signals.includes('no-source') && r.source_url === null));
+  write(sampled.map((r) => ({ ...r, ...EVIDENCE, status: 'verified' })));
+  const res = cli('verify', 'score', 'd/r.md');
+  assert.equal(res.status, 1);
+  assert.match(res.stdout, /1 verified, partial or contradicted claim\(s\) have no source URL the report cites/);
+  // Calling that claim unsupported is honest and is not an attribution failure.
+  const honest = scoreOf(sampled.map((r) => ({ ...r, ...EVIDENCE, status: r.source_url ? 'verified' : 'unsupported' })), unsourced);
+  assert.ok(!honest.blocks.some((b) => /no source URL/.test(b)));
+});
+
+test('a reading inside the interval that shows a fall or announces a reset excludes the run', () => {
+  const at = (h, m) => new Date(2026, 10, 4, h, m).toISOString();
+  // The reviewer's case: the 10:00 reading announces a weekly reset at 10:30; the 10:31 reading shows it.
+  const weekly = usagePlan([
+    { ts: at(10, 0), type: 'reading', sessionPct: 10, weeklyPct: 2, sessionResets: '14:00', weeklyResets: '4 Nov 10:30' },
+    { ts: at(10, 5), type: 'run', title: 'x' },
+    { ts: at(10, 31), type: 'reading', sessionPct: 15, weeklyPct: 0, sessionResets: '14:00', weeklyResets: '11 Nov 10:30' },
+    { ts: at(10, 45), type: 'done', title: 'x' },
+    { ts: at(10, 50), type: 'reading', sessionPct: 20, weeklyPct: 3, sessionResets: '14:00', weeklyResets: '11 Nov 10:30' },
+  ]);
+  assert.equal(weekly.measuredRuns, 0);
+  // An intermediate session fall with no reset times recorded at all.
+  const fall = usagePlan([
+    { ts: at(11, 0), type: 'reading', sessionPct: 80, weeklyPct: 10 },
+    { ts: at(11, 5), type: 'run', title: 'y' },
+    { ts: at(11, 20), type: 'reading', sessionPct: 2, weeklyPct: 11 },
+    { ts: at(11, 40), type: 'done', title: 'y' },
+    { ts: at(11, 45), type: 'reading', sessionPct: 90, weeklyPct: 12 },
+  ]);
+  assert.equal(fall.measuredRuns, 0);
+  // A weekly reset announced for a later week leaves the run measurable.
+  const later = usagePlan([
+    { ts: at(12, 0), type: 'reading', sessionPct: 10, weeklyPct: 2, weeklyResets: '10 Nov 15:18' },
+    { ts: at(12, 5), type: 'run', title: 'z' },
+    { ts: at(12, 40), type: 'done', title: 'z' },
+    { ts: at(12, 45), type: 'reading', sessionPct: 20, weeklyPct: 3, weeklyResets: '10 Nov 15:18' },
+  ]);
+  assert.equal(later.measuredRuns, 1);
 });

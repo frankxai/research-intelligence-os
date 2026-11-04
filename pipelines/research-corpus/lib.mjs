@@ -196,10 +196,15 @@ export function usagePlan(ledger) {
       const rEnd = runEnd(rows, r);
       return r.ts < after.ts && (!rEnd || rEnd.ts > before.ts);
     });
-    // A meter that fell, or a window whose reset time passed between the readings, was reset mid-run.
-    const reset = after.weeklyPct < before.weeklyPct || after.sessionPct < before.sessionPct
-      || (windowResetAfter(before.ts, before.sessionResets) ?? Infinity) <= Date.parse(after.ts);
-    if (shared || reset) continue;
+    // Every reading from `before` to `after`: a meter that fell between any two of them, or a session
+    // or weekly reset that one of them announced for a time before `after`, means a reset mid-interval,
+    // and then the difference is not a cost.
+    const span = readings.filter((r) => r.ts >= before.ts && r.ts <= after.ts);
+    const fell = span.some((r, i) => i > 0 && (r.weeklyPct < span[i - 1].weeklyPct || r.sessionPct < span[i - 1].sessionPct));
+    const end = Date.parse(after.ts);
+    const announced = span.slice(0, -1).some((r) =>
+      [windowResetAfter(r.ts, r.sessionResets), weeklyResetAfter(r.ts, r.weeklyResets)].some((t) => t !== null && t <= end));
+    if (shared || fell || announced) continue;
     costs.push({
       title: run.title, domain: run.domain,
       weekly: after.weeklyPct - before.weeklyPct, session: after.sessionPct - before.sessionPct,
@@ -561,17 +566,25 @@ function fnv1a(s) {
   return h.toString(16).padStart(8, '0');
 }
 
-// The digest of the text the claims were drawn from. Front matter is left out, so a re-export that
-// only rewrites `exported:` keeps the digest; any change to the report body changes it.
+// Front matter fields the pipeline rewrites on every export or import. Every other field (source_id,
+// source_commit, kind, verification, ...) is provenance and is hashed with the body.
+const VOLATILE_FRONT_MATTER = /^(exported|imported|generated):/;
+
+// The digest of the report the claims were drawn from: the whole file except the volatile timestamps,
+// so a re-export that only rewrites `exported:` keeps it and any other change breaks it.
 export function reportDigest(markdown) {
-  const fm = String(markdown).match(/^---\n[\s\S]*?\n---\n/);
-  return createHash('sha256').update(String(markdown).slice(fm ? fm[0].length : 0)).digest('hex');
+  const text = String(markdown);
+  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
+  const stable = fm
+    ? `---\n${fm[1].split('\n').filter((l) => !VOLATILE_FRONT_MATTER.test(l)).join('\n')}\n---\n${text.slice(fm[0].length)}`
+    : text;
+  return createHash('sha256').update(stable).digest('hex');
 }
 
-export function claimRecords(claims, { reportKey, sampledAt, seed, reportSha256 = null }) {
+export function claimRecords(claims, { reportKey, sampledAt, seed, from = 'auto', reportSha256 = null }) {
   return claims.map((c) => ({
     schema: CLAIM_SCHEMA, id: `${reportKey}#${fnv1a(c.claim)}`, report_key: reportKey, report_sha256: reportSha256,
-    sampled_at: sampledAt, seed,
+    sample_from: from, sampled_at: sampledAt, seed,
     origin: c.origin, category: c.category, claim: c.claim, claim_raw: c.claimRaw,
     sample_size: claims.length,
     source_url: c.sourceUrls[0] ?? null, source_urls: c.sourceUrls, cited_refs: c.citedRefs, claimed_date: c.claimedDate,
@@ -580,37 +593,81 @@ export function claimRecords(claims, { reportKey, sampledAt, seed, reportSha256 
   }));
 }
 
+// The sample `verify sample` writes and `verify score` redraws: the same report, seed, size and mode
+// always give the same records.
+export function drawSample(markdown, { reportKey, n, seed, from = 'auto', sampledAt = null }) {
+  const claims = extractClaims(markdown, { from });
+  const records = claimRecords(sampleClaims(claims, n, seed), { reportKey, sampledAt, seed, from, reportSha256: reportDigest(markdown) });
+  return { claimsInReport: claims.length, records };
+}
+
+// The default --n. A smaller sample can pass only when the report has fewer claims than this.
+const MIN_RELEASE_SAMPLE = 10;
+// What a checker fills in. Every other field is redrawn from the report and must match it.
+const NOT_REDRAWN = new Set(['status', 'excerpt', 'source_date', 'contradictions', 'checked_at', 'checker', 'method', 'notes', 'sampled_at']);
+const SUPPORTED_VERDICTS = new Set(['verified', 'partial', 'contradicted']);
+
 // A status is an assertion; the record must carry what backs it. Every checked record names its
 // checker and when it was checked; verified, partial and contradicted also quote the source.
 // source_date is not required: many sources carry no date, and a required field invites invented ones.
-const NEEDS_EXCERPT = new Set(['verified', 'partial', 'contradicted']);
 function lacksEvidence(r) {
   if (!CLAIM_STATUSES.includes(r.status) || r.status === 'pending') return false;
   const filled = (v) => typeof v === 'string' && v.trim() !== '';
   if (!filled(r.checker) || Number.isNaN(Date.parse(r.checked_at))) return true;
-  return NEEDS_EXCERPT.has(r.status) && !filled(r.excerpt);
+  return SUPPORTED_VERDICTS.has(r.status) && !filled(r.excerpt);
 }
 
-// reportDigest: reportDigest() of the report as it is now, or null when it is gone from the corpus.
-export function scoreClaims(records, { reportDigest: currentDigest = null } = {}) {
+// Every URL the report cites, in the two forms claims take them from: table cells and Works cited.
+function citedUrls(markdown) {
+  const urls = [...(unescapeMd(markdown).match(URL_RE) ?? []), ...[...parseWorksCited(markdown).values()].map((r) => r.url)];
+  return new Set(urls.map(normUrl));
+}
+
+// The file against the sample redrawn from the report: every expected claim once, nothing else, no
+// field changed but the checker's, and no sample smaller than the release minimum.
+function sampleBlocks(records, reportKey, reportText) {
+  const blocks = [];
+  const [first] = records;
+  const size = Number(first.sample_size) || 0;
+  const { claimsInReport, records: expected } = drawSample(reportText, { reportKey, n: size, seed: first.seed, from: first.sample_from });
+  const ids = new Set(records.map((r) => r.id));
+  const missing = expected.filter((e) => !ids.has(e.id)).length;
+  if (missing) blocks.push(`${missing} sampled record(s) missing from the file`);
+  const floor = Math.min(MIN_RELEASE_SAMPLE, claimsInReport);
+  if (size < floor) blocks.push(`a sample of ${size} is below the release minimum of ${floor} for this report: resample with a larger --n`);
+  const byId = new Map(expected.map((e) => [e.id, e]));
+  const altered = records.filter((r) => {
+    const e = byId.get(r.id);
+    return !e || Object.keys(e).some((k) => !NOT_REDRAWN.has(k) && JSON.stringify(r[k]) !== JSON.stringify(e[k]));
+  }).length;
+  if (altered) blocks.push(`${altered} record(s) differ from the sample redrawn from the report (claim, source or sample fields edited, or not in this sample)`);
+  const digest = reportDigest(reportText);
+  if (records.some((r) => r.report_sha256 !== digest)) blocks.push('the report changed since the sample was drawn (or the sample has no report digest): resample with --force');
+  return blocks;
+}
+
+// reportKey: the report the caller asked about. reportText: that report as it is now, or null when it
+// is gone. The sample is redrawn from it, so editing the file can change only what a checker fills in.
+export function scoreClaims(records, { reportKey = null, reportText = null } = {}) {
   const byStatus = Object.fromEntries(CLAIM_STATUSES.map((s) => [s, 0]));
   for (const r of records) byStatus[CLAIM_STATUSES.includes(r.status) ? r.status : 'pending'] += 1;
   const checked = records.length - byStatus.pending - byStatus.unreachable;
   const rate = (x) => (checked ? +(x / checked).toFixed(3) : null);
   const failed = byStatus.unsupported + byStatus.contradicted + byStatus.garbled;
   const blocks = [];
-  // An emptied, trimmed or padded file must not pass: every record states how many were sampled,
-  // and only distinct claim ids count toward that number.
-  const sampled = Math.max(0, ...records.map((r) => Number(r.sample_size) || 0));
   const unique = new Set(records.map((r) => r.id)).size;
   if (!records.length) blocks.push('no claim records');
-  else if (unique < sampled) blocks.push(`${sampled - unique} sampled record(s) missing from the file`);
+  else if (reportText === null) blocks.push('the report is missing from the corpus');
+  else blocks.push(...sampleBlocks(records, reportKey, reportText));
   if (unique < records.length) blocks.push(`${records.length - unique} duplicate record(s): each sampled claim counts once`);
-  // A verdict describes the text that was sampled; a changed or deleted report needs a new sample.
-  if (records.length && !currentDigest) blocks.push('the report is missing from the corpus');
-  else if (records.some((r) => r.report_sha256 !== currentDigest)) blocks.push('the report changed since the sample was drawn (or the sample has no report digest): resample with --force');
+  if (records.some((r) => r.report_key !== reportKey)) blocks.push(`record(s) describe a report other than ${reportKey}`);
   const unbacked = records.filter(lacksEvidence).length;
   if (unbacked) blocks.push(`${unbacked} checked claim(s) lack evidence (checker, checked_at, and an excerpt for verified, partial or contradicted)`);
+  // A supported verdict names the source it was checked against, and that source is one the report cites.
+  const cited = reportText === null ? new Set() : citedUrls(reportText);
+  const unattributed = records.filter((r) => SUPPORTED_VERDICTS.has(r.status) && (typeof r.source_url !== 'string'
+    || !r.source_url.trim() || (r.signals ?? []).includes('no-source') || !cited.has(normUrl(r.source_url)))).length;
+  if (unattributed) blocks.push(`${unattributed} verified, partial or contradicted claim(s) have no source URL the report cites`);
   if (byStatus.contradicted) blocks.push(`${byStatus.contradicted} claim(s) contradicted by the cited source`);
   if (checked && failed / checked > MAX_FAILED_SHARE) blocks.push(`${failed}/${checked} checked claims unsupported, contradicted or garbled (limit ${MAX_FAILED_SHARE * 100}%)`);
   if (records.length && byStatus.unreachable / records.length > MAX_UNREACHABLE_SHARE) blocks.push('too many unreachable sources to judge the sample');
@@ -626,7 +683,8 @@ export function claimChecklist(records, { reportKey, claimsInReport }) {
   const out = [
     `# Claim check: ${reportKey}`, '',
     `${records.length} of ${claimsInReport} claims, seed ${records[0]?.seed ?? '?'}, sampled ${records[0]?.sampled_at ?? '?'}.`,
-    `Fill the matching record in the .claims.jsonl file (the source of truth). Statuses: ${CLAIM_STATUSES.join(', ')}.`, '',
+    `Fill the matching record in the .claims.jsonl file (the source of truth). Statuses: ${CLAIM_STATUSES.join(', ')}.`,
+    `Edit only ${[...NOT_REDRAWN].filter((f) => f !== 'sampled_at').join(', ')}; any other change blocks release.`, '',
   ];
   records.forEach((r, i) => {
     out.push(`## ${i + 1}. ${r.category ?? r.origin}`, '', `- Claim: ${r.claim}`, `- Report's date: ${r.claimed_date ?? 'n/a'}`,
@@ -657,6 +715,18 @@ export function windowResetAfter(readingTs, hhmm) {
   const reset = new Date(at);
   reset.setHours(Number(m[1]), Number(m[2]), 0, 0);
   if (reset <= at) reset.setDate(reset.getDate() + 1);
+  return reset.getTime();
+}
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+// The weekly reset shows as local "D Mon HH:MM" ("10 Nov 15:18"): the next such time after the reading.
+export function weeklyResetAfter(readingTs, text) {
+  const m = /^(\d{1,2})\s+([A-Za-z]{3})[A-Za-z]*\.?\s+(\d{1,2}):(\d{2})$/.exec(String(text ?? '').trim());
+  const month = m ? MONTHS.indexOf(m[2].toLowerCase()) : -1;
+  if (month < 0) return null;
+  const at = new Date(readingTs);
+  const reset = new Date(at.getFullYear(), month, Number(m[1]), Number(m[3]), Number(m[4]));
+  if (reset <= at) reset.setFullYear(reset.getFullYear() + 1);
   return reset.getTime();
 }
 
