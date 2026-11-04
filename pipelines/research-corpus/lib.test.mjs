@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { briefMarkdown, catalogMarkdown, classify, classifyKind, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, usageToday, usagePlan } from './lib.mjs';
+import { briefMarkdown, catalogMarkdown, classify, classifyKind, evidenceStats, chunkMarkdown, bm25Rank, corpusKey, dueDomains, frontMatter, localFrontMatter, routeDomain, usageToday, usagePlan } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
 const DOC = 'application/vnd.google-apps.document';
@@ -175,4 +175,29 @@ test('classifyKind treats rclone-exported native Docs (markdown, size -1) as doc
   const uploaded = { title: 'readme', mimeType: 'text/markdown; charset=utf-8', fileSize: 4200 };
   assert.equal(classifyKind(native, []), 'deep-research');
   assert.equal(classifyKind(uploaded, []), 'other');
+});
+
+test('classifyKind excludes sensitive business records and superseded copies', () => {
+  const doc = (title) => ({ title, mimeType: 'text/markdown; charset=utf-8', fileSize: -1 });
+  assert.equal(classifyKind(doc('Reconciled financing package rev4'), []), 'sensitive');
+  assert.equal(classifyKind(doc('Meeting started 2026/07/14 - Notes by Gemini'), []), 'sensitive');
+  assert.equal(classifyKind(doc('14 SUPERSEDED by 15 plan'), []), 'superseded');
+  assert.equal(classifyKind(doc('Old research [SUPERSEDED_BY_REV4.1]'), []), 'superseded');
+  assert.equal(classifyKind(doc('Archive - old research'), []), 'superseded');
+  assert.equal(classifyKind(doc('Agent runtime research 2026'), []), 'deep-research');
+});
+
+test('evidenceStats marks reports with enough distinct sources as cited', () => {
+  const urls = Array.from({ length: 12 }, (_, i) => `https://site${i % 6}.example.com/page${i}`).join('\n');
+  assert.equal(evidenceStats(`# Report\n\n${urls}\n\n## Sources\n`).cited, true);
+  assert.equal(evidenceStats('# Notes\n\nNo links here.').cited, false);
+});
+
+test('chunkMarkdown keeps headings and parses front matter; bm25Rank ranks the matching passage first', () => {
+  const md = '---\ntitle: "T"\nkind: deep-research\n---\n# Pricing\n\nFounding discount rules for digital goods.\n\n## Refunds\n\nWithdrawal right waiver for digital content.\n';
+  const { meta, chunks } = chunkMarkdown(md);
+  assert.equal(meta.kind, 'deep-research');
+  assert.ok(chunks.some((c) => c.heading === 'Refunds'));
+  const hits = bm25Rank(chunks, 'withdrawal waiver digital content', { limit: 2 });
+  assert.equal(hits[0].heading, 'Refunds');
 });

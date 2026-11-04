@@ -16,6 +16,12 @@ export const DEFAULT_PERSONAL_PATTERNS = [
   'untitled document', 'template',
 ];
 
+// Business, financing, legal and meeting records are private operating material, not research.
+// They are excluded by default so they never reach an index that agents query or a person shares.
+export const SENSITIVE_RE = /\b(financing|ondernemingsplan|business plan|qredits|term sheet|invoice|contracting|algemene voorwaarden|notes by gemini|meeting started|draft for|not sent|kvk|tax return|payslip|salary|passport|iban|nda|cap table|data room|legal pack|transcription|transcript|bewerbung|fitness|strategic briefing)\b/i;
+// An old revision or a copy the owner already marked as replaced must not outrank its successor.
+export const SUPERSEDED_RE = /superseded|\bduplicate\b|obsolete|deprecated|label_historical|^archive\b/i;
+
 export function slugify(text) {
   return text
     .normalize('NFKD')
@@ -35,6 +41,8 @@ export function routeDomain(title, domains) {
 export function classifyKind(file, personalPatterns) {
   const lower = file.title.toLowerCase();
   if (personalPatterns.some((p) => p && lower.includes(p.toLowerCase()))) return 'personal';
+  if (SENSITIVE_RE.test(file.title)) return 'sensitive';
+  if (SUPERSEDED_RE.test(file.title.trim())) return 'superseded';
   // With --drive-export-formats md, rclone lists a native Google Doc as text/markdown with size -1;
   // an uploaded .md file has a real size, so the pair identifies native Docs.
   const mime = String(file.mimeType ?? '');
@@ -66,7 +74,7 @@ export function classify(files, { domains, personalPatterns = DEFAULT_PERSONAL_P
       id: file.id,
       title: file.title,
       kind,
-      domain: kind === 'personal' ? null : routeDomain(file.title, domains),
+      domain: ['personal', 'sensitive', 'superseded'].includes(kind) ? null : routeDomain(file.title, domains),
       createdTime: file.createdTime,
       modifiedTime: file.modifiedTime,
       bytes: Number(file.fileSize || 0),
@@ -78,7 +86,7 @@ export function classify(files, { domains, personalPatterns = DEFAULT_PERSONAL_P
 
 // Every corpus file states what it is. "unverified" is deliberate: a Deep Research report is a
 // model's synthesis of web sources, so agents must cite it as a claim, never as measured fact.
-export function frontMatter(entry, exportedAt) {
+export function frontMatter(entry, exportedAt, evidence = null) {
   const lines = [
     '---',
     `title: ${JSON.stringify(entry.title)}`,
@@ -91,6 +99,7 @@ export function frontMatter(entry, exportedAt) {
     `exported: ${exportedAt}`,
     `producer: ${entry.kind === 'deep-research' ? 'gemini-deep-research' : 'gemini-chat'}`,
     `verification: unverified-ai-synthesis`,
+    ...(evidence ? [`evidence: ${evidence.cited ? 'cited' : 'uncited'}`, `source_urls: ${evidence.urls}`, `source_hosts: ${evidence.hosts}`] : []),
     '---',
     '',
   ];
@@ -263,4 +272,68 @@ export function briefMarkdown({ now, workersAi, gateway, inventory, due, usage }
     ? ` Last app reading ${snap.ts.slice(0, 16)}: ${snap.remaining ?? '?'} Deep Research left${snap.note ? ` (${snap.note})` : ''}.`
     : ' No app reading recorded yet; Google no longer publishes a fixed Ultra quota, so read it from the app.'));
   return out.join('\n') + '\n';
+}
+
+// A report is "cited" when it carries enough distinct links from enough distinct hosts to check.
+// This measures presence of sources, not their truth: a cited claim is still unverified.
+export function evidenceStats(markdown) {
+  const urls = new Set(markdown.match(/https?:\/\/[^\s)\]>"']+/g) ?? []);
+  const hosts = new Set([...urls].map((u) => { try { return new URL(u).hostname; } catch { return ''; } }).filter(Boolean));
+  const hasSources = /^#{1,4}\s*(works cited|sources|references|bibliography)\b/im.test(markdown);
+  const words = markdown.split(/\s+/).filter(Boolean).length;
+  return { words, urls: urls.size, hosts: hosts.size, hasSources, cited: urls.size >= 10 && hosts.size >= 5 };
+}
+
+// Split a corpus markdown file into passages that keep their nearest heading, so a hit can be
+// cited by section. Front matter is parsed into fields and kept out of the passages.
+export function chunkMarkdown(text, maxChars = 1200) {
+  let body = text;
+  const meta = {};
+  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
+  if (fm) {
+    body = text.slice(fm[0].length);
+    for (const line of fm[1].split('\n')) {
+      const m = line.match(/^(\w+): (.*)$/);
+      if (m) meta[m[1]] = m[2].replace(/^"|"$/g, '');
+    }
+  }
+  const chunks = [];
+  let heading = meta.title ?? '';
+  let buf = '';
+  const flush = () => { if (buf.trim()) chunks.push({ heading, text: buf.trim() }); buf = ''; };
+  for (const para of body.split(/\n{2,}/)) {
+    const h = para.match(/^#{1,4}\s+(.*)$/m);
+    if (h && para.startsWith('#')) { flush(); heading = h[1].trim(); }
+    if (buf.length + para.length > maxChars) flush();
+    buf += (buf ? '\n\n' : '') + para;
+  }
+  flush();
+  return { meta, chunks };
+}
+
+const STOP = new Set('the a an and or of to in on for with is are was be by as at it this that from not but if than then we you i'.split(' '));
+export function tokenize(s) {
+  return String(s).toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').split(/[^a-z0-9]+/).filter((w) => w.length > 1 && !STOP.has(w));
+}
+
+// Okapi BM25 over passages. It is the baseline to beat before any vector index is trusted.
+export function bm25Rank(passages, query, { k1 = 1.5, b = 0.75, limit = 8 } = {}) {
+  const docs = passages.map((p) => tokenize(`${p.heading} ${p.text}`));
+  const avg = docs.reduce((s, d) => s + d.length, 0) / (docs.length || 1);
+  const df = new Map();
+  for (const d of docs) for (const t of new Set(d)) df.set(t, (df.get(t) ?? 0) + 1);
+  const q = [...new Set(tokenize(query))];
+  const scored = docs.map((d, i) => {
+    const tf = new Map();
+    for (const t of d) tf.set(t, (tf.get(t) ?? 0) + 1);
+    let score = 0;
+    for (const t of q) {
+      const f = tf.get(t);
+      if (!f) continue;
+      const idf = Math.log(1 + (docs.length - df.get(t) + 0.5) / (df.get(t) + 0.5));
+      score += idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * d.length) / avg)));
+    }
+    return { i, score };
+  });
+  return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit).map((s) => ({ ...passages[s.i], score: +s.score.toFixed(3) }));
 }

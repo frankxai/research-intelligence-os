@@ -22,13 +22,13 @@
 // All private state lives in RESEARCH_HOME (default ~/.starlight/research), never in this repo.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, renameSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, renameSync, statSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
-  localFrontMatter, slugify, usageToday, usagePlan,
+  localFrontMatter, slugify, usageToday, usagePlan, evidenceStats, chunkMarkdown, bm25Rank,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -73,7 +73,12 @@ async function worker(route, body = {}) {
   return out;
 }
 
-const domains = JSON.parse(readFileSync(path.join(HERE, 'domains.json'), 'utf8')).domains;
+// Private routing rules (brand and estate vocabulary) live beside the corpus, never in this public repo.
+// They are tried first, so an owner can route their own titles without editing the shared list.
+const localDomains = existsSync(path.join(HOME, 'domains.local.json'))
+  ? JSON.parse(readFileSync(path.join(HOME, 'domains.local.json'), 'utf8')).domains
+  : [];
+const domains = [...localDomains, ...JSON.parse(readFileSync(path.join(HERE, 'domains.json'), 'utf8')).domains];
 
 function die(msg, code = 1) { console.error(msg); process.exit(code); }
 function readJson(file, fallback) { return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : fallback; }
@@ -145,6 +150,8 @@ function cmdClassify() {
     deepResearch: count((e) => e.kind === 'deep-research' && e.include),
     geminiCanvas: count((e) => e.kind === 'gemini-canvas' && e.include),
     personalExcluded: count((e) => e.kind === 'personal'),
+    sensitiveExcluded: count((e) => e.kind === 'sensitive'),
+    supersededExcluded: count((e) => e.kind === 'superseded'),
     duplicates: count((e) => e.duplicateOf),
     unrouted: count((e) => e.include && e.domain === 'unrouted'),
   }, null, 2));
@@ -161,7 +168,8 @@ function cmdExport() {
     mkdirSync(staging, { recursive: true });
     const tmp = path.join(staging, `${entry.id}.md`);
     run('rclone', ['backend', 'copyid', RCLONE_REMOTE, entry.id, tmp, '--drive-export-formats', 'md']);
-    writeAtomic(target, frontMatter(entry, exportedAt) + readFileSync(tmp, 'utf8'));
+    const body = readFileSync(tmp, 'utf8');
+    writeAtomic(target, frontMatter(entry, exportedAt, evidenceStats(body)) + body);
     done += 1;
   }
   console.log(`exported ${done} changed document(s) -> ${P.corpus}`);
@@ -225,10 +233,66 @@ function positional() {
 
 async function cmdSearch() {
   const query = positional();
-  if (!query) die('usage: corpus.mjs search "<question>" [--domain <id>] [--limit N]');
+  if (!query) die('usage: corpus.mjs search "<question>" [--domain <id>] [--limit N] [--local]');
+  if (flag('local') !== undefined || !existsSync(P.workerSecrets)) return localSearch(query);
   const out = await worker('/search', { query, domain: flag('domain'), limit: Number(flag('limit') || 8) });
   for (const p of out.passages) console.log(`\n[${p.score}] ${p.key}\n${p.text.trim().slice(0, 600)}`);
   if (!out.passages.length) console.log('no passages (is the corpus indexed? run: corpus.mjs status)');
+}
+
+// BM25 over the local corpus: usable without the Worker, and the baseline a vector index must beat.
+function listCorpusFiles(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true }).flatMap((d) => {
+    const p = path.join(dir, d.name);
+    return d.isDirectory() ? listCorpusFiles(p) : d.name.endsWith('.md') ? [p] : [];
+  });
+}
+
+function localSearch(query) {
+  const wanted = flag('domain');
+  const passages = [];
+  for (const file of listCorpusFiles(P.corpus)) {
+    const rel = path.relative(P.corpus, file).split(path.sep).join('/');
+    if (wanted && !rel.startsWith(`${wanted}/`)) continue;
+    const { meta, chunks } = chunkMarkdown(readFileSync(file, 'utf8'));
+    for (const c of chunks) passages.push({ ...c, key: rel, evidence: meta.evidence ?? 'n/a', verification: meta.verification ?? '?' });
+  }
+  const hits = bm25Rank(passages, query, { limit: Number(flag('limit') || 8) });
+  for (const h of hits) console.log(`
+[${h.score}] ${h.key} > ${h.heading} (${h.evidence}, ${h.verification})
+${h.text.slice(0, 600)}`);
+  if (!hits.length) console.log(`no local passages (${passages.length} indexed)`);
+}
+
+function cmdAudit() {
+  const inv = readJson(P.inventory, null) || die('no inventory; run "classify" first');
+  const rows = [];
+  for (const file of listCorpusFiles(P.corpus)) {
+    const { meta } = chunkMarkdown(readFileSync(file, 'utf8'));
+    rows.push({ key: path.relative(P.corpus, file).split(path.sep).join('/'), kind: meta.kind, domain: meta.domain, evidence: meta.evidence ?? 'unknown', urls: Number(meta.source_urls ?? 0) });
+  }
+  const tally = (f) => rows.reduce((a, r) => ((a[f(r)] = (a[f(r)] ?? 0) + 1), a), {});
+  const stale = rows.filter((r) => !inv.some((e) => e.include && corpusKey(e) === r.key));
+  const out = {
+    exported: rows.length, byKind: tally((r) => r.kind), byDomain: tally((r) => r.domain), byEvidence: tally((r) => `${r.kind}/${r.evidence}`),
+    uncitedDeepResearch: rows.filter((r) => r.kind === 'deep-research' && r.evidence === 'uncited').map((r) => r.key),
+    notInInventory: stale.map((r) => r.key),
+  };
+  writeAtomic(path.join(HOME, 'audit.json'), JSON.stringify(out, null, 2));
+  console.log(JSON.stringify(out, null, 2));
+}
+
+// Removes local derived copies of documents the inventory no longer includes (reclassified as
+// sensitive or superseded). Drive originals are never touched; export recreates anything needed.
+function cmdPrune() {
+  const inv = readJson(P.inventory, null) || die('no inventory; run "classify" first');
+  const keep = new Set(inv.filter((e) => e.include).map(corpusKey));
+  let removed = 0;
+  for (const file of listCorpusFiles(P.corpus)) {
+    if (!keep.has(path.relative(P.corpus, file).split(path.sep).join('/'))) { rmSync(file); removed += 1; }
+  }
+  console.log(`pruned ${removed} local file(s) no longer in the inventory`);
 }
 
 async function cmdAsk() {
@@ -320,7 +384,7 @@ function cmdUsage() {
 
 const commands = {
   list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, sync: cmdSync, status: cmdStatus,
-  search: cmdSearch, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
+  search: cmdSearch, audit: cmdAudit, prune: cmdPrune, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
 };
 const cmd = commands[process.argv[2]];
 if (!cmd) die(`commands: ${Object.keys(commands).join(', ')}`, 2);
