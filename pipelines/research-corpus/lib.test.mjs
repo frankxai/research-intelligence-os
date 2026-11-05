@@ -10,6 +10,7 @@ import {
   briefMarkdown, catalogMarkdown, classify, classifyKind, evidenceStats, chunkMarkdown, bm25Rank, corpusKey, dueDomains, frontMatter,
   localFrontMatter, routeDomain, routeByTopic, usageToday, usagePlan, parseWorksCited, splitCitations, extractClaims, sampleClaims, claimRecords,
   scoreClaims, pipelineHealth, claimSignals, openRunFor, reportDigest, drawSample, seedFromDigest, manifestHash, releaseMinimum, CLAIM_SCHEMA,
+  withoutEmbeddedData,
 } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
@@ -871,4 +872,41 @@ test('usage plan and show ignore run details, so old rows and detailed rows meas
   assert.equal(usagePlan(detailed).measuredRuns, 1);
   const now = new Date('2026-11-04T12:00:00Z');
   assert.deepEqual(usageToday(detailed, now), usageToday(plain, now));
+});
+
+// Embedded images: a synthetic export that ends in a large base64 image whose payload contains "v5" tokens.
+const IMAGE_BLOB = 'iVBORw0KGgoAAAANSUhEUgAA+v5/Qx9z'.repeat(5000);
+const IMAGE_LINE = `[image1]: <data:image/png;base64,${IMAGE_BLOB}>`;
+const PROSE_DOC = ['---', 'title: "Placeholder"', 'kind: deep-research', '---', '# Placeholder', '',
+  'Release v5 of the placeholder tool ships with a new parser.', '', '## Notes', '', 'Ordinary prose without that term.', '',
+  `Checksum ${'0123456789abcdef'.repeat(8)} is a long token inside a sentence.`, '', '![][image1]', ''].join('\n');
+
+test('search passages drop embedded base64 images, so short terms no longer match inside them', () => {
+  const withImage = `${PROSE_DOC}\n${IMAGE_LINE}\n`;
+  const { chunks } = chunkMarkdown(withImage);
+  assert.ok(!chunks.some((c) => c.text.includes('base64') || c.text.includes('Qx9z')), 'no passage carries the image');
+  assert.deepEqual(chunks, chunkMarkdown(PROSE_DOC).chunks, 'the other passages are unchanged');
+  const hits = bm25Rank(chunks, 'v5');
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].text, /Release v5 of the placeholder tool/);
+  // An encoded blob with no data: prefix is skipped as mostly non-word; prose with a long token is kept.
+  const blob = chunkMarkdown(`${PROSE_DOC}\n${'QUJD+v5/'.repeat(200)}\n`).chunks;
+  assert.deepEqual(blob, chunkMarkdown(PROSE_DOC).chunks);
+  assert.ok(chunks.some((c) => c.text.includes('Checksum 0123456789abcdef')), 'a sentence with a 128-character hash stays searchable');
+  assert.equal(withoutEmbeddedData('See ![chart](data:image/png;base64,QUJD+v5/) here.'), 'See ![chart]() here.', 'an inline data URI goes too');
+});
+
+test('dropping images from passages leaves the report digest and the claim gate as they were', (t) => {
+  const imageReport = `${REPORT.replace('# **Report**', '# **Report**\n\nRelease v5 of the placeholder tool ships with a new parser.')}\n\n${IMAGE_LINE}\n`;
+  const { manifestFile, fill, cli } = sampledReport(t, imageReport);
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+  assert.equal(manifest.report_sha256, reportDigest(imageReport), 'the digest still covers the file as written, image included');
+  assert.notEqual(manifest.report_sha256, reportDigest(withoutEmbeddedData(imageReport)));
+  fill('verified');
+  assert.equal(cli('verify', 'score', 'd/r.md').status, 0);
+  const search = cli('search', 'v5', '--local');
+  assert.equal(search.status, 0, search.stderr);
+  assert.equal((search.stdout.match(/^\[\d/gm) ?? []).length, 1, 'one passage matches');
+  assert.match(search.stdout, /Release v5/);
+  assert.ok(!search.stdout.includes('Qx9z') && !search.stdout.includes('base64'));
 });

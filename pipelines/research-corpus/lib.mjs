@@ -361,6 +361,25 @@ export function evidenceStats(markdown) {
   return { words, urls: urls.size, hosts: hosts.size, hasSources, cited: urls.size >= 10 && hosts.size >= 5 };
 }
 
+// Embedded images. A Google Docs export ends with one `[imageN]: <data:image/png;base64,...>` line per image, up
+// to megabytes of base64 whose letter runs match short query terms ("v5") hundreds of times. Passages drop those
+// definition lines and any other data URI payload. This is search-time only: the corpus file, its digest and its
+// claim samples are untouched.
+const DATA_URI_DEFINITION_RE = /^[ \t]*\[[^\]\n]+\]:[ \t]*<?data:[^\s>]*>?[ \t]*$/gim;
+const DATA_URI_RE = /data:[a-z]+\/[a-z0-9.+-]+(?:;[a-z0-9=.+-]+)*;base64,[A-Za-z0-9+/=]+/gi;
+// A passage that is mostly unbroken runs of base64-like characters (other encoded blobs) is not prose.
+const ENCODED_RUN_RE = /[A-Za-z0-9+/=]{200,}/g;
+const MAX_ENCODED_SHARE = 0.6;
+
+export function withoutEmbeddedData(body) {
+  return body.replace(DATA_URI_DEFINITION_RE, '').replace(DATA_URI_RE, '');
+}
+
+function mostlyEncoded(text) {
+  const encoded = (text.match(ENCODED_RUN_RE) ?? []).reduce((sum, run) => sum + run.length, 0);
+  return encoded > MAX_ENCODED_SHARE * text.length;
+}
+
 // Split a corpus markdown file into passages that keep their nearest heading, so a hit can be
 // cited by section. Front matter is parsed into fields and kept out of the passages.
 export function chunkMarkdown(raw, maxChars = 1200) {
@@ -378,8 +397,8 @@ export function chunkMarkdown(raw, maxChars = 1200) {
   const chunks = [];
   let heading = meta.title ?? '';
   let buf = '';
-  const flush = () => { if (buf.trim()) chunks.push({ heading, text: buf.trim() }); buf = ''; };
-  for (const para of body.split(/\n{2,}/)) {
+  const flush = () => { if (buf.trim() && !mostlyEncoded(buf.trim())) chunks.push({ heading, text: buf.trim() }); buf = ''; };
+  for (const para of withoutEmbeddedData(body).split(/\n{2,}/)) {
     const h = para.match(/^#{1,4}\s+(.*)$/m);
     if (h && para.startsWith('#')) { flush(); heading = h[1].trim(); }
     if (buf.length + para.length > maxChars) flush();
