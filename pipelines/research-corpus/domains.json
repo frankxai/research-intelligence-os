@@ -3,6 +3,8 @@
   "domains": [
     { "id": "agentic-income-streams", "name": "Agentic income streams, developer packs and monetization", "staleDays": 14,
       "keywords": ["agentic income", "income stream", "affiliate", "monetiz", "polar.sh", "polar checkout", "merchant of record", "whop", "gumroad", "lemon squeezy", "skill pack", "product and whop", "digital product pricing", "revenue ledger", "passive income"] },
+    { "id": "arcanea", "name": "Arcanea platform, product and strategy research (not canon)", "staleDays": 30,
+      "keywords": ["arcanea", "arcanean"] },
     { "id": "ai-models-platforms", "name": "AI models, agent runtimes and platforms", "staleDays": 7,
       "keywords": ["model", "agent", "llm", "cloudflare", "vercel", "knowledge layer", "multi-agent", "orchestrator", "mcp", "harness", "telemetry", "prompt", "ai for science"] },
     { "id": "github-ecosystem", "name": "GitHub ecosystem and notable repositories", "staleDays": 14,
@@ -12,7 +14,7 @@
     { "id": "web-design", "name": "Web design and front-end craft", "staleDays": 30,
       "keywords": ["web design", "website", "next.js", "headless cms", "front-end", "frontend"] },
     { "id": "marketing", "name": "Marketing, SEO, AEO and distribution", "staleDays": 21,
-      "keywords": ["seo", "aeo", "geo", "marketing", "positioning", "pr brief", "social", "content"] },
+      "keywords": ["seo", "aeo", "geo", "marketing", "positioning", "pr brief", "social", "content", "creator observatory", "creator-observatory", "dream100"] },
     { "id": "community", "name": "Community management", "staleDays": 30,
       "keywords": ["community", "founder city", "vibeclub", "circle", "academy"] },
     { "id": "solana", "name": "Solana ecosystem", "staleDays": 14, "keywords": ["solana"] },
@@ -21,10 +23,10 @@
     { "id": "web3-general", "name": "Web3, tokens and on-chain products", "staleDays": 21, "keywords": ["web3", "blockchain", "crypto", "token", "wallet"] },
     { "id": "publishing-books", "name": "Publishing, books and authorship", "staleDays": 45,
       "keywords": ["book", "publishing", "author", "chapter", "bestseller", "writing", "editorial", "legend of"] },
-    { "id": "music-media", "name": "Music and media production", "staleDays": 45, "keywords": ["music", "sonic", "lyrical", "suno"] },
+    { "id": "music-media", "name": "Music and media production", "staleDays": 45, "keywords": ["music", "sonic", "lyrical", "suno", "media intelligence", "media-intelligence"] },
     { "id": "human-potential", "name": "Psychology, consciousness and human potential", "staleDays": 60,
       "keywords": ["jung", "psychology", "evolution", "consciousness", "reality architect", "manifestation"] },
     { "id": "business-strategy", "name": "Business strategy, funding and operations", "staleDays": 30,
-      "keywords": ["funding", "accelerator", "partner", "investor", "strategy", "masterplan", "battlecard", "whop", "decision"] }
+      "keywords": ["funding", "accelerator", "partner", "investor", "strategy", "masterplan", "battlecard", "whop", "decision", "portfolio audit", "portfolio-audit", "constellation", "strategic-actions", "one-pager"] }
   ]
 }

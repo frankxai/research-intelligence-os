@@ -154,3 +154,16 @@ test('importKey separates same-named files in different folders of one repo', ()
 test('importKey outside a git repo falls back to the parent folder name', () => {
   assert.equal(importKey({ domain: 'marketing', sourcePath: 'C:/notes/brief.md', repoRoot: null }), 'marketing/estate-notes-brief.md');
 });
+
+test('estate briefs and Arcanea docs route instead of landing in unrouted', () => {
+  const cases = [
+    ['Creator-Observatory-Brief-2026-11-04', 'marketing'],
+    ['Dream100-Operating-Plan-2026-11-01', 'marketing'],
+    ['Portfolio-Audit-2026-10-30', 'business-strategy'],
+    ['Constellation Weekly Brief — 2026-09-07', 'business-strategy'],
+    ['[CANONICAL] Media-Intelligence-Evidence-Loop-2026-10-27', 'music-media'],
+    ['THE-ARCANEAN-CODE-v2', 'arcanea'],
+    ['ARCANEA-COMMAND-CENTER (4)', 'arcanea'],
+  ];
+  for (const [title, domain] of cases) assert.equal(routeDomain(title, domains), domain, title);
+});
