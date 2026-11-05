@@ -34,7 +34,7 @@ Turns Gemini Deep Research reports, estate documents and live model catalogs int
 | `node corpus.mjs import <f.md>... --domain <id>` | brings local or repo docs in with path and commit provenance |
 | `node corpus.mjs push` | uploads changed files to R2 and triggers `/sync` |
 | `node corpus.mjs sync` · `status` | Worker: copy R2 into AI Search · indexing state per item |
-| `node corpus.mjs search "<q>" [--domain id] [--local]` | ranked passages with source keys (Worker, or local BM25 when `--local` or no token). Local passages (search, eval) drop embedded `data:` images and passages that are mostly encoded runs; the corpus files, their digests and claim samples are untouched. `push` still uploads files as written, images included, so the Worker's index is not filtered |
+| `node corpus.mjs search "<q>" [--domain id] [--local]` | ranked passages with source keys (Worker, or local BM25 when `--local` or no token). Local passages (search, eval) drop embedded `data:` images and cut each unbroken run of 200 or more base64- or hex-like characters out of its passage, keeping the text around it; a passage is dropped only when a cut leaves fewer than three words. The corpus files, their digests and claim samples are untouched. `push` still uploads files as written, images included, so the Worker's index is not filtered |
 | `node corpus.mjs ask "<q>" [--domain id]` | cited answer (model: `ANSWER_MODEL` in `worker/wrangler.jsonc`) |
 | `node corpus.mjs triage summary\|apply` · `audit` · `prune` | reviewer verdicts and quarantine · evidence tally · remove local copies no longer in the inventory |
 | `node corpus.mjs eval [--file q.json]` | hit@1, hit@5, MRR of local BM25 on `eval/questions.json`; a vector index must beat it |

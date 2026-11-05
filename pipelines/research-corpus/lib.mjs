@@ -367,17 +367,15 @@ export function evidenceStats(markdown) {
 // claim samples are untouched.
 const DATA_URI_DEFINITION_RE = /^[ \t]*\[[^\]\n]+\]:[ \t]*<?data:[^\s>]*>?[ \t]*$/gim;
 const DATA_URI_RE = /data:[a-z]+\/[a-z0-9.+-]+(?:;[a-z0-9=.+-]+)*;base64,[A-Za-z0-9+/=]+/gi;
-// A passage that is mostly unbroken runs of base64-like characters (other encoded blobs) is not prose.
+// Other encoded blobs (a long hex key, a hash in a table cell, the tail of a hex URL): each unbroken run of 200 or
+// more base64- or hex-like characters is replaced by a space, and the prose, code and table text around it stays.
+// A passage that lost a run is kept unless fewer than MIN_WORDS_AFTER_STRIP word tokens remain; a passage that
+// lost nothing is never dropped.
 const ENCODED_RUN_RE = /[A-Za-z0-9+/=]{200,}/g;
-const MAX_ENCODED_SHARE = 0.6;
+const MIN_WORDS_AFTER_STRIP = 3;
 
 export function withoutEmbeddedData(body) {
   return body.replace(DATA_URI_DEFINITION_RE, '').replace(DATA_URI_RE, '');
-}
-
-function mostlyEncoded(text) {
-  const encoded = (text.match(ENCODED_RUN_RE) ?? []).reduce((sum, run) => sum + run.length, 0);
-  return encoded > MAX_ENCODED_SHARE * text.length;
 }
 
 // Split a corpus markdown file into passages that keep their nearest heading, so a hit can be
@@ -397,11 +395,21 @@ export function chunkMarkdown(raw, maxChars = 1200) {
   const chunks = [];
   let heading = meta.title ?? '';
   let buf = '';
-  const flush = () => { if (buf.trim() && !mostlyEncoded(buf.trim())) chunks.push({ heading, text: buf.trim() }); buf = ''; };
-  for (const para of withoutEmbeddedData(body).split(/\n{2,}/)) {
+  let stripped = false;
+  const flush = () => {
+    const text = buf.trim();
+    if (text && !(stripped && tokenize(text).length < MIN_WORDS_AFTER_STRIP)) chunks.push({ heading, text });
+    buf = '';
+    stripped = false;
+  };
+  for (const raw of withoutEmbeddedData(body).split(/\n{2,}/)) {
+    const para = raw.replace(ENCODED_RUN_RE, ' ');
+    const changed = para !== raw;
+    if (changed && !para.trim()) continue;
     const h = para.match(/^#{1,4}\s+(.*)$/m);
     if (h && para.startsWith('#')) { flush(); heading = h[1].trim(); }
     if (buf.length + para.length > maxChars) flush();
+    stripped ||= changed;
     buf += (buf ? '\n\n' : '') + para;
   }
   flush();

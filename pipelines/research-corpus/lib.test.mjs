@@ -896,6 +896,33 @@ test('search passages drop embedded base64 images, so short terms no longer matc
   assert.equal(withoutEmbeddedData('See ![chart](data:image/png;base64,QUJD+v5/) here.'), 'See ![chart]() here.', 'an inline data URI goes too');
 });
 
+// Long encoded runs above the 200-character threshold: only the run goes, the text around it stays.
+const HEX = (n) => '0123456789abcdef'.repeat(Math.ceil(n / 16)).slice(0, n);
+const FRONT = '---\ntitle: "Placeholder"\nkind: deep-research\n---\n';
+const textOf = (md) => chunkMarkdown(md).chunks.map((c) => c.text).join('\n\n');
+
+test('a long encoded run is cut out of its passage, never the passage around it', () => {
+  // A paragraph followed by a fenced 512-character hex modulus.
+  const fenced = chunkMarkdown(`${FRONT}# Keys\n\nThe placeholder service signs requests with this public key.\n\n\`\`\`\n${HEX(512)}\n\`\`\`\n`).chunks;
+  assert.equal(fenced.length, 1);
+  assert.match(fenced[0].text, /The placeholder service signs requests with this public key\./);
+  assert.ok(!fenced[0].text.includes(HEX(200)), 'the modulus itself is gone');
+  // A table with a 300-character hash cell keeps every other cell.
+  const table = textOf(`${FRONT}# Hashes\n\n| Name | Digest | Size |\n|---|---|---|\n| alpha | ${HEX(300)} | 12 KB |\n| bravo | short | 4 KB |\n`);
+  for (const cell of ['| Name | Digest | Size |', 'alpha', '12 KB', 'bravo', 'short', '4 KB']) assert.ok(table.includes(cell), cell);
+  assert.ok(!table.includes(HEX(200)));
+  // A long hex URL keeps the words around it (the run takes the base64-like path characters next to the hex too).
+  const url = textOf(`${FRONT}# Downloads\n\nDownload the placeholder archive from https://cdn.example.com/blobs/${HEX(260)} before the release date.\n`);
+  assert.match(url, /Download the placeholder archive from https:\/\/cdn\.example/);
+  assert.match(url, /before the release date\./);
+  assert.ok(!url.includes(HEX(200)));
+  // A base64 blob on its own yields no passage, and a data-URI image line still vanishes.
+  assert.deepEqual(chunkMarkdown(`${FRONT}${'QUJD+v5/'.repeat(300)}\n`).chunks, []);
+  assert.deepEqual(chunkMarkdown(`${FRONT}${IMAGE_LINE}\n`).chunks, []);
+  // A short passage that never held a run is kept exactly as before, however few words it has.
+  assert.deepEqual(chunkMarkdown(`${FRONT}# Notes\n\nOk.\n`).chunks, [{ heading: 'Notes', text: '# Notes\n\nOk.' }]);
+});
+
 test('dropping images from passages leaves the report digest and the claim gate as they were', (t) => {
   const imageReport = `${REPORT.replace('# **Report**', '# **Report**\n\nRelease v5 of the placeholder tool ships with a new parser.')}\n\n${IMAGE_LINE}\n`;
   const { manifestFile, fill, cli } = sampledReport(t, imageReport);
