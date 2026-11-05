@@ -114,7 +114,7 @@ function personalPatterns() {
 
 function cmdList() {
   const depth = String(flag('depth') || process.env.RESEARCH_DRIVE_DEPTH || '3');
-  const res = run('rclone', ['lsjson', RCLONE_REMOTE, '--files-only', '--max-depth', depth, '-M', '--drive-export-formats', 'md']);
+  const res = run('rclone', ['lsjson', RCLONE_REMOTE, '-R', '--files-only', '--max-depth', depth, '-M', '--drive-export-formats', 'md']);
   const files = JSON.parse(res.stdout).map((f) => ({
     id: f.ID,
     title: path.basename(f.Path || f.Name).replace(/\.md$/, ''),
