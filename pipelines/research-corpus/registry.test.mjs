@@ -132,7 +132,7 @@ test('an unsampled report is unranked and has no claim-derived scores', () => {
   assert.equal(r.score_verification_coverage, null);
   assert.deepEqual([r.score_source_breadth, r.score_freshness, r.score_economic_relevance], [15, 15, 15]);
   assert.match(toCsv(rows, ['key', 'rank_score', 'score_evidence_integrity']), /,unranked,\n$/);
-  assert.deepEqual(snapshot.presence.find((d) => d.id === 'score').cells.find(([b]) => b === 'A'), ['A', 'none']);
+  assert.deepEqual(Object.keys(snapshot).sort(), ['cost', 'counts', 'total'], 'the shareable snapshot has no score or release section');
 });
 
 test('a contradicted claim blocks release but the report is still ranked for review', () => {
@@ -148,7 +148,8 @@ test('a contradicted claim blocks release but the report is still ranked for rev
     assert.equal(r.checker, 'independent-test-checker');
     assert.equal(typeof r.rank_score, 'number');
     assert.equal(r.score_evidence_integrity, 26.7);
-    assert.match(shared(home), /^- Blocked: some\.$/m, 'the shareable tier says only that something is blocked');
+    assert.match(shared(home), /Release verdicts, claim-check results and score bands are in the private tier\./);
+    assert.doesNotMatch(shared(home), /blocked/i, 'the shareable tier says nothing about the verdict');
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -253,7 +254,8 @@ test('build fails closed without a redaction list and writes only under registry
     const expected = Object.entries(FILES).flatMap(([tier, names]) => names.map((n) => `registry/${tier}/${n}`));
     assert.deepEqual(added.sort(), expected.sort());
     assert.match(read(home, 'private', 'REGISTRY.md'), /Not checked for personal names/);
-    for (const tier of ['private', 'shareable']) assert.match(read(home, tier, 'REGISTRY.md'), /Weights are hypotheses/);
+    assert.match(read(home, 'private', 'REGISTRY.md'), /Weights are hypotheses/);
+    assert.doesNotMatch(read(home, 'shareable', 'REGISTRY.md'), /Weights are hypotheses/, 'scores are private, so their caveat is too');
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -410,7 +412,7 @@ test('review 6.1: the shareable tier carries no character, word, key, id or Driv
     assert.match(read(home, 'private', 'REGISTRY.md'), /PRIVATE: do not share/i);
   } finally { rmSync(home, { recursive: true, force: true }); }
   const vocabulary = shareVocabulary();
-  assert.deepEqual(shareableScan('| marketing | <10 | some | none | 2026 |', vocabulary), { nonAscii: 0, unknownWords: 0, ok: true });
+  assert.deepEqual(shareableScan('| marketing | <10 | 2026 |', vocabulary), { nonAscii: 0, unknownWords: 0, ok: true });
   assert.equal(shareableScan('| 3d12d62c8411 | Confidential dossier |', vocabulary).unknownWords, 3, 'an id and free text are refused');
   assert.equal(shareableScan('café', vocabulary).nonAscii, 1);
 });
@@ -522,7 +524,7 @@ test('review 7.2: an excluded report leaves no ledger run, cost, timestamp or cl
     assert.match(priv, /Measured runs: 1\. Mean cost per measured run: window 30%, weekly 3%/, 'averages over kept runs only');
     assert.match(priv, /\| Usage-ledger runs \/ matched to a report \/ with a measured cost \| 1 \/ 1 \/ 1 \|/);
     assert.match(priv, /1 excluded, withheld/);
-    assert.match(read(home, 'shareable', 'REGISTRY.md'), /Insufficient data: fewer than 5 measured runs/);
+    assert.match(read(home, 'shareable', 'REGISTRY.md'), /Insufficient data: fewer than 10 measured runs/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -572,7 +574,7 @@ test('verified-rate gate: a sample of six verified and four partial claims is bl
       const [r] = readRows(home);
       assert.equal(r.release, release, JSON.stringify(r.release_blocks));
       if (release === 'blocked') assert.ok(r.release_blocks.some((b) => /verified rate 60% is below the 70% minimum/.test(b)));
-      assert.match(shared(home), release === 'pass' ? /^- Passes: some\.$/m : /^- Blocked: some\.$/m, 'the shareable tier gives the verdict as some or none');
+      assert.doesNotMatch(shared(home), /passes|blocked|50-69%|70% or more/i, 'the shareable tier gives no verdict or band');
     } finally { rmSync(home, { recursive: true, force: true }); }
   }
   for (const text of readers({ release: 'pass' })) assert.doesNotMatch(text, /verified (or|and) partial/i);
@@ -706,9 +708,9 @@ test('review 8.4: the row-id salt is gone; private ids are the plain key hash an
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('review 8.5: usage cost shows only as a band over at least five measured runs', () => {
+test('review 8.5/10.2: usage cost shows only as a band over at least ten measured runs', () => {
   const reports = Object.fromEntries([...Array(6)].map((_, i) => [`marketing/2026-11-0${i + 1}-study-${i}.md`, report({ title: `Market study number ${i} draft`, domain: i < 5 ? 'marketing' : 'community', id: `m-${i}` })]));
-  for (const [n, cost] of [[4, /Insufficient data/], [5, /window 25-49%, weekly 2-4%/]]) {
+  for (const [n, cost] of [[9, /Insufficient data: fewer than 10 measured runs/], [10, /window 25-49%, weekly 2-4%/]]) {
     const home = makeHome({ reports, ledger: measuredLedger(separateRuns(n), []), denylist: [] });
     try {
       runBuild({ home, now: NOW });
@@ -740,8 +742,7 @@ test('review 9.1/9.2/9.4: one coarse file, rounded counts, no cross-tabulation, 
     assert.match(md, /^Reports: 10 \(rounded/m, 'the total is rounded too');
     assert.doesNotMatch(md, /hidden|<5|relevance >=|product-strategist|growth-and-distribution|brand-and-voice/i, 'no masking scheme and no role cross-tab');
     assert.deepEqual(readdirSync(path.join(eleven, 'registry', 'shareable')), ['REGISTRY.md'], 'a single shareable file');
-    assert.match(md, /no more often than monthly/);
-    assert.match(md, /^- Passes: none\.$/m);
+    assert.match(md, /Share ONE snapshot with a recipient/);
     assert.equal(shared(five), shared(six), 'a snapshot of five reports and one of six are identical: the added report is not visible');
   } finally { for (const h of [eleven, five, six]) rmSync(h, { recursive: true, force: true }); }
   assert.deepEqual([0, 1, 9, 10, 14, 15, 114].map(coarseCount), ['<10', '<10', '<10', '10', '10', '20', '110']);
@@ -756,11 +757,11 @@ test('review 9.3: a run or close record carrying an excluded Drive id is dropped
     const priv = read(home, 'private', 'REGISTRY.md');
     assert.match(priv, /Measured runs: 4\./, 'four eligible runs stay four');
     assert.doesNotMatch(priv, /removed document|2026-10-28T10|name a title that matches no run/i, 'neither the run nor its close record is reported');
-    assert.match(shared(home), /Insufficient data: fewer than 5 measured runs/);
+    assert.match(shared(home), /Insufficient data: fewer than 10 measured runs/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('review 9.5: verified-rate and sampled-share bands come from whole counts in both tiers', () => {
+test('review 9.5: verified-rate and sampled-share bands come from whole counts (private tier; the shareable tier has none)', () => {
   const table = (n) => ['# Large study', '', '| Claim | Source URL | Date |', '|---|---|---|',
     ...Array.from({ length: n }, (_, i) => `| Tool number ${i} offers plan option ${i} today | https://t${i}.example.com/p | 2026-10 |`), ''].join('\n');
   const keyA = 'marketing/2026-11-04-verified-boundary-study.md';
@@ -782,9 +783,45 @@ test('review 9.5: verified-rate and sampled-share bands come from whole counts i
       'private: 69.95% is under 70%');
     assert.deepEqual([rows[keyB].claims_sampled, rows[keyB].claims_in_report, rows[keyB].sampled_share, rows[keyB].sampled_share_band], [2499, 10000, 0.2499, '10-24%'],
       'private: 24.99% is under 25%');
-    const md = shared(home);
-    assert.deepEqual(['50-69%', '70% or more', '10-24%', '25-49%'].map((b) => cellOf(md, b)), ['some', 'none', 'some', 'none'], 'shareable: the same bands');
+    assert.doesNotMatch(shared(home), /50-69%|70% or more|10-24%|25-49%/, 'shareable: no claim-check bands at all');
   } finally { rmSync(home, { recursive: true, force: true }); }
   assert.equal(verifiedRateBand({ release: 'blocked', claims_checked: 2000, claims_verified: 1400 }), '70% or more', '70.00% is 70% or more');
   assert.equal(sampledShareBand({ release: 'blocked', claims_sampled: 2500, claims_in_report: 10000 }), '25-49%', '25.00% is 25% or more');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Round 10 on 0135f7c: snapshot differencing. Presence flags are removed (fixed), the cost band waits for ten measured
+// runs (mitigated), and rounding-boundary differencing is documented as a known limit (accepted, documented).
+
+test('review 10.1: claim-checking one report between two snapshots changes nothing in the shareable file', () => {
+  const corpus = Object.fromEntries([...Array(12)].map((_, i) => [`marketing/2026-11-0${(i % 9) + 1}-market-note-${i}.md`,
+    report({ title: `Market note number ${i}`, domain: 'marketing', id: `n-${i}` })]));
+  const checked = { [KEY]: STUDY, ...corpus };
+  const { records } = checkedSample(['contradicted', 'verified', 'verified']);
+  const before = makeHome({ reports: checked, denylist: [] });
+  const after = makeHome({ reports: checked, verify: { [`${STEM}.claims.jsonl`]: jsonl(records) }, denylist: [] });
+  try {
+    for (const h of [before, after]) runBuild({ home: h, now: NOW });
+    assert.equal(readRows(after).find((r) => r.key === KEY).release, 'blocked', 'the private tier records the check');
+    assert.equal(shared(before), shared(after), 'the shareable snapshot cannot tell that a report was checked');
+    assert.match(shared(after), /^Release verdicts, claim-check results and score bands are in the private tier\.$/m);
+    assert.doesNotMatch(shared(after), /\b(some|passes|blocked|unranked|hypotheses)\b|^### (Verified|Sampled|Score)/mi);
+  } finally { for (const h of [before, after]) rmSync(h, { recursive: true, force: true }); }
+});
+
+test('review 10.3: the known limits are printed in every shareable snapshot and documented in the README', () => {
+  const home = makeHome({ reports: { [KEY]: STUDY } });
+  try {
+    runBuild({ home, now: NOW });
+    const md = shared(home);
+    assert.match(md, /^## Known limits of the shareable tier$/m);
+    assert.match(md, /9->10, 14->15 or 24->25/);
+    assert.match(md, /Share ONE snapshot with a recipient and do not refresh it for the same recipient/);
+    assert.match(md, /never share per-report data/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+  const readme = readFileSync(path.join(HERE, 'README.md'), 'utf8');
+  assert.match(readme, /^### Known limits of the shareable tier$/m);
+  assert.match(readme, /9->10, 14->15 or 24->25/);
+  assert.match(readme, /Share ONE snapshot with a recipient, and do not refresh it for the same recipient/);
+  assert.match(readme, /Never share per-report data/);
 });

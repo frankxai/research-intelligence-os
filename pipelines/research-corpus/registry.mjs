@@ -10,9 +10,10 @@
 //
 // The shareable tier is one coarse file: the corpus total and one-dimension counts (public domain id, kind, evidence
 // label, age band), each rounded to the nearest 10 with anything under 10 shown as '<10'; never a cross-tabulation.
-// Whatever depends on which reports were claim-checked (release verdicts, verified-rate, sampled-share and score bands)
-// shows only as 'some' or 'none'. Usage cost shows only as a band over at least five measured runs. It carries a method
-// note: coarse by design, refresh no more often than monthly, the private tier is the source of truth. Before writing,
+// Nothing that depends on which reports were claim-checked (release verdicts, verified-rate, sampled-share and score
+// bands) is published. Usage cost shows only as a band over at least ten measured runs. It carries a method note and
+// its known limits: coarse by design, share one snapshot per recipient and never refresh it for the same recipient,
+// the private tier is the source of truth. Before writing,
 // it must be printable ASCII and use only words this file defines, or the build stops. The private tier keeps
 // per-report rows, exact scores, role relevance and ledger links. Documents excluded by Drive id, quarantine or the
 // pipeline's exclusion rules are withheld from both tiers, with their ledger runs, costs and claim diagnostics; the
@@ -205,27 +206,25 @@ const TEXT = {
   bandNote: 'Score band (both tiers): computed from the public weights in registry.mjs only, never from private configuration: A 70-100, B 40-69, C 0-39; `unranked` means no claim records.',
   share: {
     title: '# Research registry: shareable snapshot',
-    note: '> **Shareable, coarse by design.** This file holds the corpus total and one-dimension counts, each rounded to the nearest 10 (under 10 shows as `<10`), and, for anything that depends on which reports were claim-checked, only whether a bucket is empty (`some` or `none`). It holds no per-report row or id, no title, file path, corpus key, Drive id or link, no score, no cross-tabulation and no text from a report or the usage ledger. Before writing, every character was checked to be printable ASCII and every word to be defined by the registry; anything else stops the build.',
-    method: 'Method: the figures are coarse on purpose, because exact or cross-tabulated counts let a reader recover individual reports by subtraction. For the same reason, refresh a shared snapshot no more often than monthly: two snapshots taken close together can be compared to learn about the reports added between them. The private tier (`registry/private/`) is the owner\'s source of truth and is never shared.',
+    note: '> **Shareable, coarse by design.** This file holds the corpus total and one-dimension counts, each rounded to the nearest 10 (under 10 shows as `<10`). It holds no per-report row or id, no title, file path, corpus key, Drive id or link, no score, no release verdict or claim-check result, no cross-tabulation and no text from a report or the usage ledger. Before writing, every character was checked to be printable ASCII and every word to be defined by the registry; anything else stops the build.',
+    method: 'Method: the figures are coarse on purpose, because exact or cross-tabulated counts let a reader recover individual reports by subtraction. The private tier (`registry/private/`) is the owner\'s source of truth and is never shared.',
+    hLimits: '## Known limits of the shareable tier',
+    limits: 'The figures are rounded to 10, so two snapshots shared with the same recipient can still be compared across a rounding boundary (for example 9->10, 14->15 or 24->25) by someone who knows exactly which report changed between them, and that comparison can reveal the report\'s domain, kind, evidence label or age band. Share ONE snapshot with a recipient and do not refresh it for the same recipient. Treat the private tier as the owner\'s source of truth, and never share per-report data.',
     built: 'Built {day}.',
     withheld: 'Documents excluded by Drive id, quarantine or the pipeline exclusion rules, if any, are withheld from every figure in this file, together with their usage-ledger runs and costs; their number is not stated.',
+    release: 'Release verdicts, claim-check results and score bands are in the private tier.',
     hCorpus: '## Corpus', total: 'Reports: {n} (rounded to the nearest 10; under 10 shows as <10).',
-    hRelease: '## Claim gate', passes: '- Passes: {v}.', blocked: '- Blocked: {v}.',
     hCounts: '## Reports by one dimension (each count rounded to the nearest 10; under 10 shows as <10)',
-    hPresence: '## Claim-check bands (some or none; never a count)',
     dims: {
       domain: 'Domain id (public ids; every other id counts as other)', kind: 'Kind', evidence: 'Evidence label (cited: at least 10 URLs and 5 hosts)',
       age: 'Age band (days since the report was created)',
-      verified_rate: 'Verified-rate band (verified of checked claims, from whole counts)',
-      sampled_share: 'Sampled-share band (sampled of all claims in the report, from whole counts)',
-      score: 'Score band (public weights only: A 70-100, B 40-69, C 0-39)',
     },
     hCost: '## Usage cost',
     cost: 'Mean cost per measured Deep Research run over the whole usage ledger: window {s}, weekly {w}. Bands only; never per run.',
-    costInsufficient: 'Insufficient data: fewer than 5 measured runs. No per-run times or costs are published.',
+    costInsufficient: 'Insufficient data: fewer than 10 measured runs. No per-run times or costs are published.',
     noLedger: 'No usage ledger.',
     diagnostics: 'Role relevance and pipeline diagnostics are in the private tier.',
-    head: { bucket: 'Bucket', reports: 'Reports', present: 'Present' },
+    head: { bucket: 'Bucket', reports: 'Reports' },
   },
 };
 
@@ -379,16 +378,14 @@ function redactRow(row, redact) {
 // ---------------------------------------------------------------------------------------------
 // Shareable tier: one coarse snapshot. Cell suppression cannot stop subtraction across tables, files and successive
 // snapshots, so the shareable tier publishes no cross-tabulation at all: the corpus total and one-dimension counts,
-// each rounded to the nearest 10 (anything under 10, zero included, shows as '<10'), and, for everything that depends
-// on which reports were claim-checked (release verdicts, verified-rate, sampled-share and score bands), only whether a
-// bucket is empty. Nothing per report, per run or from private configuration is written.
+// each rounded to the nearest 10 (anything under 10, zero included, shows as '<10'). Nothing that depends on which
+// reports were claim-checked (release verdicts, verified-rate, sampled-share and score bands) is published, not even
+// whether a bucket is empty: a none -> some change between two snapshots names the one report checked in between.
+// Nothing per report, per run or from private configuration is written.
 const enumOf = (field, v) => (ENUMS[field].includes(v) ? v : OTHER);
 const domainOf = (v) => (PUBLIC_DOMAINS.has(v) ? v : OTHER);
 const ROUND_TO = 10;
 export const coarseCount = (n) => (n < ROUND_TO ? `<${ROUND_TO}` : String(Math.round(n / ROUND_TO) * ROUND_TO));
-const SOME = 'some';
-const NONE = 'none';
-const presence = (n) => (n > 0 ? SOME : NONE);
 
 const B = BANDS;
 // Bands come from whole counts, never from a rounded ratio, so 1399 verified of 2000 checked (69.95%) is under 70%
@@ -430,15 +427,10 @@ const COUNTED = [
   { id: 'evidence', buckets: [...ENUMS.evidence, OTHER], of: (r) => enumOf('evidence', r.evidence) },
   { id: 'age', buckets: B.age, of: ageBand },
 ];
-// Bands that depend on which reports were claim-checked: presence only, and only for checked reports.
-const PRESENCE = [
-  { id: 'verified_rate', buckets: B.verified_rate.slice(0, 3), of: verifiedRateBand },
-  { id: 'sampled_share', buckets: B.sampled_share.slice(0, 4), of: sampledShareBand },
-  { id: 'score', buckets: B.score.slice(0, 3), of: (r) => r.score_band },
-];
 
-// Usage cost for the shareable tier: a band of the mean over the kept measured runs, and only over at least five.
-const MIN_RUNS_FOR_COST = 5;
+// Usage cost for the shareable tier: a band of the mean over the kept measured runs, and only over at least ten, so a
+// recipient who knows the cost of most runs learns little about the one they do not know.
+const MIN_RUNS_FOR_COST = 10;
 function costLine(plan, ledgerPresent) {
   if (!ledgerPresent) return TEXT.share.noLedger;
   if (!plan || plan.measuredRuns < MIN_RUNS_FOR_COST) return TEXT.share.costInsufficient;
@@ -450,9 +442,7 @@ export function coarseSnapshot(rows, { plan = null, ledgerPresent = false } = {}
   const count = (pred) => rows.filter(pred).length;
   return {
     total: coarseCount(rows.length),
-    release: { pass: presence(count((r) => r.release === 'pass')), blocked: presence(count((r) => r.release === 'blocked')) },
     counts: COUNTED.map((d) => ({ id: d.id, cells: d.buckets.map((b) => [b, coarseCount(count((r) => d.of(r) === b))]) })),
-    presence: PRESENCE.map((d) => ({ id: d.id, cells: d.buckets.map((b) => [b, presence(count((r) => d.of(r) === b))]) })),
     cost: costLine(plan, ledgerPresent),
   };
 }
@@ -460,7 +450,7 @@ export function coarseSnapshot(rows, { plan = null, ledgerPresent = false } = {}
 // The words the shareable tier may contain, all defined in this file. Nothing from private configuration, the
 // corpus or the ledger is added; numbers are allowed by shape.
 export function shareVocabulary() {
-  const sources = [TEXT, BANDS, ENUMS, PUBLIC_DOMAIN_IDS, [OTHER, SOME, NONE]];
+  const sources = [TEXT, BANDS, ENUMS, PUBLIC_DOMAIN_IDS, [OTHER]];
   return new Set(JSON.stringify(sources).toLowerCase().match(/[a-z0-9]+/g));
 }
 
@@ -936,11 +926,10 @@ export function shareableMarkdown(snap, { builtDay }) {
   const S = TEXT.share;
   const tables = (list, head) => list.flatMap((d) => [`### ${S.dims[d.id]}`, '', ...mdTable([S.head.bucket, head], d.cells), '']);
   return [
-    S.title, '', S.note, '', S.method, '', TEXT.hypotheses, '', fmt(S.built, { day: builtDay }), '', S.withheld, '', TEXT.checkedShare, '',
+    S.title, '', S.note, '', S.method, '', S.hLimits, '', S.limits, '', fmt(S.built, { day: builtDay }), '',
+    S.withheld, '', S.release, '', TEXT.checkedShare, '',
     S.hCorpus, '', fmt(S.total, { n: snap.total }), '',
-    S.hRelease, '', fmt(S.passes, { v: snap.release.pass }), fmt(S.blocked, { v: snap.release.blocked }), '',
     S.hCounts, '', ...tables(snap.counts, S.head.reports),
-    S.hPresence, '', ...tables(snap.presence, S.head.present),
     S.hCost, '', snap.cost, '',
     S.diagnostics, '',
   ].join('\n');

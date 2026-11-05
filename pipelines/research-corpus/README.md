@@ -43,8 +43,9 @@ Turns Gemini Deep Research reports, estate documents and live model catalogs int
 | `node corpus.mjs brief` | session brief plus `_platform/latest-models.md` catalog in the corpus |
 | `node corpus.mjs queue` | domains whose newest Deep Research report is past its window |
 | `node corpus.mjs usage reading\|run\|done\|abandon\|plan\|show` | Gemini Deep Research usage ledger (below) |
+| `node registry.mjs build [--allow-unredacted]` · `redact-hash "<phrase>"` | private and shareable research registry under `RESEARCH_HOME/registry/` (below) · a line for the private name list |
 
-Tests: `node --test lib.test.mjs`.
+Tests: `node --test lib.test.mjs registry.test.mjs`.
 
 ## Claim verification
 
@@ -117,7 +118,26 @@ Gemini Ultra meters usage in percent, not runs: `gemini.google.com/usage` shows 
 
 `done` and `abandon` refuse a title that matches no open run at that time and list the runs that are open, so a typo cannot leave the real run open.
 
-`usage show` and `usage plan` ignore the model, mode, prompt and doc id fields, and rows written before they existed measure the same. The registry reads them when present: a run closed with `--doc-id` is matched to the report with that Drive id before any title match; the private tier keeps the model and mode labels and the full prompt hash; the shareable tier maps model and mode to a fixed list or `other` and keeps only the first 12 hex digits of the prompt hash. A 12-digit prefix can still confirm a guess of a short or standard prompt, so do not record a prompt file whose wording is itself confidential.
+`usage show` and `usage plan` ignore the model, mode, prompt and doc id fields, and rows written before they existed measure the same. The registry reads them when present: a run closed with `--doc-id` is matched to the report with that Drive id before any title match; the private tier keeps the model and mode labels and the full prompt hash; the shareable tier carries none of them. Even the private hash can confirm a guess of a short or standard prompt, so do not record a prompt file whose wording is itself confidential.
+
+## Research registry
+
+`node registry.mjs build` writes two tiers under `RESEARCH_HOME/registry/`:
+
+- **`private/`** (`REGISTRY.md`, `reports.csv`, `reports.jsonl`, `roles.csv`): one row per report with title, corpus key, path, Drive link, exact scores, claim tallies, release verdict, role relevance and usage-ledger links. It is the owner's source of truth and is never shared. Titles are redacted best-effort against the hashed name list in `registry/redact.sha256.txt`, and the build refuses to run without that list unless given `--allow-unredacted`.
+- **`shareable/REGISTRY.md`**: one coarse snapshot. It holds the corpus total and one-dimension counts (public domain id, kind, evidence label, age band), each rounded to the nearest 10 (under 10 shows as `<10`). Usage cost shows only as a band, and only over at least 10 measured runs. It carries no per-report data, no cross-tabulation, no release verdict, claim-check result or score, no private configuration and no report or ledger text. The build stops unless every character is printable ASCII and every word is one the registry defines.
+
+Documents excluded by Drive id (`exclude-ids.txt`), by quarantine or by the pipeline's own exclusion rules are withheld from both tiers, together with their usage-ledger runs, costs and claim diagnostics. A run closed with an excluded Drive id is dropped even when no copy of the document exists. Tests: `node --test registry.test.mjs`.
+
+### Known limits of the shareable tier
+
+The figures are rounded to 10, so two snapshots shared with the same recipient can still be compared across a rounding boundary (for example 9->10, 14->15 or 24->25) by someone who knows exactly which report changed between them. That comparison can reveal the changed report's domain, kind, evidence label or age band. In the same way, a recipient who knows the cost of most measured runs can bound the one they do not know, which is why the cost band waits for at least 10 runs.
+
+- Share ONE snapshot with a recipient, and do not refresh it for the same recipient.
+- Treat the private tier as the owner's source of truth.
+- Never share per-report data.
+
+The same limits are printed in every `shareable/REGISTRY.md`.
 
 ## NotebookLM
 
