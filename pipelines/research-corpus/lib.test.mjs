@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, importKey, localFrontMatter, routeDomain, usageToday } from './lib.mjs';
+import { briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter, importKey, localFrontMatter, routeDomain, staleDriveKeys, usageToday } from './lib.mjs';
 
 const domains = JSON.parse(readFileSync(new URL('./domains.json', import.meta.url), 'utf8')).domains;
 const DOC = 'application/vnd.google-apps.document';
@@ -55,6 +55,14 @@ test('unknown size (rclone reports -1) falls back to the title', () => {
 
 test('routeDomain returns unrouted when nothing matches', () => {
   assert.equal(routeDomain('Allow', domains), 'unrouted');
+});
+
+test('agentic-income-streams routes monetization and pack reports before generic agent keyword', () => {
+  const [report] = classify([doc('inc1', 'Agentic Income Streams and Polar.sh Pack Economics', 142000)], { domains });
+  assert.equal(report.kind, 'deep-research');
+  assert.equal(report.domain, 'agentic-income-streams');
+  const [runtime] = classify([doc('rt1', 'AI Agent Knowledge Layers Architecture', 217676)], { domains });
+  assert.equal(runtime.domain, 'ai-models-platforms');
 });
 
 test('front matter marks every report as unverified AI synthesis', () => {
@@ -145,4 +153,35 @@ test('importKey separates same-named files in different folders of one repo', ()
 
 test('importKey outside a git repo falls back to the parent folder name', () => {
   assert.equal(importKey({ domain: 'marketing', sourcePath: 'C:/notes/brief.md', repoRoot: null }), 'marketing/estate-notes-brief.md');
+});
+
+test('estate briefs and Arcanea docs route instead of landing in unrouted', () => {
+  const cases = [
+    ['Creator-Observatory-Brief-2026-11-04', 'marketing'],
+    ['Dream100-Operating-Plan-2026-11-01', 'marketing'],
+    ['Portfolio-Audit-2026-10-30', 'business-strategy'],
+    ['Constellation Weekly Brief — 2026-09-07', 'business-strategy'],
+    ['[CANONICAL] Media-Intelligence-Evidence-Loop-2026-10-27', 'music-media'],
+    ['THE-ARCANEAN-CODE-v2', 'arcanea'],
+    ['ARCANEA-COMMAND-CENTER (4)', 'arcanea'],
+  ];
+  for (const [title, domain] of cases) assert.equal(routeDomain(title, domains), domain, title);
+});
+
+test('staleDriveKeys keeps included exports and flags excluded, re-routed or vanished ones', () => {
+  const inventory = classify([
+    doc('keep', 'Cloudflare and Vercel Architecture Hub', 364108),
+    doc('gone', 'Personal journal reflections', 90000),
+  ], { domains });
+  const keep = corpusKey(inventory.find((e) => e.id === 'keep'));
+  const driveKeys = [keep, 'ai-models-platforms/2026-10-28-personal-journal-reflections.md', 'unrouted/2026-10-28-cloudflare-and-vercel-architecture-hub.md'];
+  assert.deepEqual(staleDriveKeys({ driveKeys, inventory }), [
+    'ai-models-platforms/2026-10-28-personal-journal-reflections.md',
+    'unrouted/2026-10-28-cloudflare-and-vercel-architecture-hub.md',
+  ]);
+});
+
+test('staleDriveKeys with nothing stale returns an empty list', () => {
+  const inventory = classify([doc('a', 'Cloudflare and Vercel Architecture Hub', 364108)], { domains });
+  assert.deepEqual(staleDriveKeys({ driveKeys: [corpusKey(inventory[0])], inventory }), []);
 });

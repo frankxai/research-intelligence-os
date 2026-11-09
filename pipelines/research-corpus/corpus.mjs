@@ -25,7 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
-  importKey, localFrontMatter, usageToday,
+  importKey, localFrontMatter, staleDriveKeys, usageToday,
 } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -113,17 +113,19 @@ function personalPatterns() {
 }
 
 function cmdList() {
-  const res = run('rclone', ['lsjson', RCLONE_REMOTE, '--files-only', '--max-depth', '1', '-M', '--drive-export-formats', 'md']);
+  const depth = String(flag('depth') || process.env.RESEARCH_DRIVE_DEPTH || '3');
+  const res = run('rclone', ['lsjson', RCLONE_REMOTE, '-R', '--files-only', '--max-depth', depth, '-M', '--drive-export-formats', 'md']);
   const files = JSON.parse(res.stdout).map((f) => ({
     id: f.ID,
-    title: f.Name.replace(/\.md$/, ''),
+    title: path.basename(f.Path || f.Name).replace(/\.md$/, ''),
+    drivePath: f.Path || f.Name,
     mimeType: f.MimeType === 'text/markdown' ? 'application/vnd.google-apps.document' : f.MimeType,
     createdTime: f.Metadata?.btime || f.ModTime,
     modifiedTime: f.ModTime,
     fileSize: f.Size,
   }));
   writeAtomic(P.listing, JSON.stringify(files, null, 2));
-  console.log(`listed ${files.length} files -> ${P.listing}`);
+  console.log(`listed ${files.length} files (max-depth ${depth}) -> ${P.listing}`);
 }
 
 function cmdClassify() {
@@ -221,6 +223,33 @@ async function cmdPush() {
   if (result.failed?.length) die(`${result.failed.length} document(s) failed to index; rerun push to retry`);
 }
 
+// Dry run by default. --apply deletes the R2 objects and moves the local copies to pruned/,
+// so a wrong prune is undone by moving the files back and running push.
+async function cmdPrune() {
+  const inventory = readJson(P.inventory, null) || die('no inventory; run "classify" first');
+  if (!inventory.some((e) => e.include)) die('refusing to prune: the inventory includes no documents, which would empty the corpus');
+  const driveKeys = walk(P.corpus)
+    .filter((f) => /^source: google-drive$/m.test(readFileSync(f, 'utf8').slice(0, 600)))
+    .map((f) => path.relative(P.corpus, f).split(path.sep).join('/'));
+  const stale = staleDriveKeys({ driveKeys, inventory });
+  for (const key of stale) console.log(`stale  ${key}`);
+  if (!process.argv.includes('--apply')) {
+    console.log(`${stale.length} of ${driveKeys.length} Drive export(s) stale. Dry run; add --apply to remove them from r2://${BUCKET}.`);
+    return;
+  }
+  const manifest = readJson(P.manifest, {});
+  for (const key of stale) {
+    run(WRANGLER, ['r2', 'object', 'delete', `${BUCKET}/${key}`, '--remote']);
+    const target = path.join(HOME, 'pruned', key);
+    mkdirSync(path.dirname(target), { recursive: true });
+    renameSync(path.join(P.corpus, key), target);
+    delete manifest[key];
+    writeAtomic(P.manifest, JSON.stringify(manifest, null, 2));
+  }
+  console.log(`pruned ${stale.length} document(s); local copies in ${path.join(HOME, 'pruned')}`);
+  if (stale.length && workerToken()) console.log(JSON.stringify(await worker('/sync'), null, 2));
+}
+
 function positional() {
   return process.argv.slice(3).filter((a, i, all) => !a.startsWith('--') && !all[i - 1]?.startsWith('--')).join(' ');
 }
@@ -309,7 +338,7 @@ function cmdUsage() {
 }
 
 const commands = {
-  list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, sync: cmdSync, status: cmdStatus,
+  list: cmdList, classify: cmdClassify, export: cmdExport, import: cmdImport, push: cmdPush, prune: cmdPrune, sync: cmdSync, status: cmdStatus,
   search: cmdSearch, ask: cmdAsk, brief: cmdBrief, queue: cmdQueue, usage: cmdUsage,
 };
 const cmd = commands[process.argv[2]];
