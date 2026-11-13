@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { sanitize, UNTRUSTED_NOTE } from './untrusted.mjs';
 
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research');
@@ -96,14 +97,20 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
       ...only(e, 'repos').sort((a, b) => (reg.repos[b].stars || 0) - (reg.repos[a].stars || 0)).map(fmtRepo), '',
       ...only(e, 'papers').map(fmtPaper), '');
   }
+  let flags = 0;
   for (const [key] of SECTIONS) {
     out.push(`## ${LABEL[key]}`, '');
-    for (const e of have) out.push(`### ${e}`, '', t.engines[e].sections[key] || '_section not found in this report_', '');
+    for (const e of have) {
+      const raw = t.engines[e].sections[key];
+      const { text, flagged } = raw ? sanitize(raw) : { text: '_section not found in this report_', flagged: 0 };
+      flags += flagged;
+      out.push(`### ${e}`, '', UNTRUSTED_NOTE, '', text, '');
+    }
   }
   const vdir = join(here, 'verticals', t.vertical);
   mkdirSync(vdir, { recursive: true });
   writeFileSync(join(vdir, `${t.id}.md`), out.join('\n'));
-  const row = { id: t.id, engines: have.join('+'), consensusRepos: consensusRepos.length, consensusPapers: consensusPapers.length };
+  const row = { id: t.id, engines: have.join('+'), consensusRepos: consensusRepos.length, consensusPapers: consensusPapers.length, injectionFlags: flags };
   byVertical.set(t.vertical, [...(byVertical.get(t.vertical) || []), row]);
 }
 

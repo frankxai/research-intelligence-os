@@ -3,9 +3,10 @@
 // The run must `return '=====REPORT-START=====\n' + markdown + '\n=====REPORT-END====='`.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { sanitize } from '../untrusted.mjs';
 
 const [, , file, id] = process.argv;
 if (!file || !id) { console.error('usage: harvest.mjs <file> <id>'); process.exit(2); }
@@ -21,7 +22,11 @@ const end = raw.lastIndexOf('=====REPORT-END=====');
 if (start < 0 || end < 0) { console.error('markers not found'); process.exit(3); }
 // The overflow file holds the run result as JSON; the slice between markers is JSON-escaped text.
 let text = JSON.parse(`"${raw.slice(start + 22, end).replace(/^\\n/, '').replace(/\\n$/, '')}"`);
+// BrowserOS's per-read nonce markers are replaced by a durable `trust:` field in the front matter;
+// the text itself is sanitised (hidden characters, HTML comments, instruction-like lines flagged).
 text = text.replace(/^\[UNTRUSTED_PAGE_CONTENT[^\n]*\n/, '').replace(/\n?\[END_UNTRUSTED_PAGE_CONTENT[^\]]*\]\s*$/, '').trim();
+const { text: cleaned, flagged } = sanitize(text);
+text = cleaned;
 
 const words = text.split(/\s+/).length;
 const links = (text.match(/\]\(https?:\/\//g) || []).length;
@@ -39,6 +44,8 @@ const fm = [
   `words: ${words}`,
   `inline_links: ${links}`,
   'review_state: unverified',
+  'trust: untrusted-web-derived',
+  `injection_flags: ${flagged}`,
   '---',
   '',
 ].join('\n');
