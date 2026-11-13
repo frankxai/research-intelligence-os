@@ -25,7 +25,7 @@ const DOMAIN = {
   science: 'ai-for-science',
   industry: 'business-strategy',
 };
-const DOMAIN_OVERRIDE = { 'kb-10-community-building': 'community', 'kb-25-oss-distribution-agent-tools': 'github-ecosystem' };
+const DOMAIN_OVERRIDE = { 'kb-10-community-building': 'community', 'kb-35-oss-distribution-agent-tools': 'github-ecosystem' };
 
 const fm = (text) => Object.fromEntries((text.match(/^---\n([\s\S]*?)\n---/)?.[1] || '')
   .split('\n').map((l) => l.split(/:\s(.*)/s).slice(0, 2)));
