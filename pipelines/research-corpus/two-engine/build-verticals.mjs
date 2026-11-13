@@ -21,7 +21,9 @@ const SECTIONS = [
   ['oss', /^#{2,3} .*(\bOSS\b|\bGitHub projects?\b|\bopen-source projects?\b)/i],
   ['papers', /^#{2,3} .*(papers?)\b/i],
   ['models', /^#{2,3} .*(mental model|frameworks practitioners)/i],
-  ['stack', /^#{2,3} .*(stack recommendation|solo founder)/i],
+  // Hyphenated and reworded headings ("Concrete Solo-Founder Stack", "Recommended Four-Layer Stack")
+  // are the same section; the old pattern missed them and reported the section as absent.
+  ['stack', /^#{2,3} .*(stack recommendation|solo[- ]founder|recommended\b.*\b(stack|architecture)|concrete\b.*\bstack)/i],
   ['open', /^#{2,3} .*open questions/i],
 ];
 const LABEL = { oss: 'Top OSS projects', papers: 'Key papers', models: 'Mental models and frameworks', stack: 'Stack recommendation', open: 'Open questions' };
