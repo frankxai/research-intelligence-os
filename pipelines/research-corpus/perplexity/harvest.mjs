@@ -6,6 +6,8 @@ import { homedir } from 'node:os';
 
 const [, , file, id, url, vertical = 'unsorted'] = process.argv;
 if (!file || !id || !url) { console.error('usage: harvest.mjs <file> <id> <url> [vertical]'); process.exit(2); }
+const SAFE = /^(?!\.{1,2}$)[\w.-]+$/;
+if (!SAFE.test(id) || !SAFE.test(vertical)) { console.error('id and vertical must be plain names'); process.exit(2); }
 
 const raw = readFileSync(file.replace(/^\\\\\?\\/, ''), 'utf8');
 const lit = raw.slice(raw.indexOf('return: ') + 8).trim();
