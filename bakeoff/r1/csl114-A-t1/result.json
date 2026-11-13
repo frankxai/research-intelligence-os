@@ -1,0 +1,19 @@
+{
+  "task": "csl114",
+  "arm": "A",
+  "trial": 1,
+  "model": "claude-sonnet-5-5",
+  "started_utc": "2026-11-13T21:44:52Z",
+  "finished_utc": "2026-11-13T21:47:02Z",
+  "tests_run": [
+    "python3 packs/estate-guard/tests/test_hooks.py -> 105 ok, 0 fail",
+    "node --test -> 407 tests, 402 pass, 0 fail, 5 skipped",
+    "python3 scripts/validate_skills.py -> exit 0",
+    "python3 scripts/check_links.py -> exit 0",
+    "python3 scripts/generate_catalog.py --check -> exit 0",
+    "python3 scripts/check_counts.py -> exit 0"
+  ],
+  "self_assessment": "done",
+  "subagents_used": 0,
+  "notes": "Gate parses rm with shlex; exempts only when every recursive rm target resolves (realpath) strictly below /tmp or /var/tmp. cd tracked only across &&; pipes/redirects/newlines/vars/../brace/symlink-escape/scratch-root itself still ask. Count of parsed rm -r must be >= regex matches. DENY untouched. Other ASK rules still apply in same command. Not run: build-catalog.mjs, generate_site.py (not touched by change)."
+}
