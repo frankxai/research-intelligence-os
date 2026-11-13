@@ -33,9 +33,14 @@ for (const v of readdirSync(root).filter((d) => existsSync(join(root, d, 'README
   const topics = readdirSync(join(root, v)).filter((f) => /^kb-.*\.md$/.test(f));
   const topicRows = [];
   const repoCount = new Map();
+  const seen = new Set();
+  let dual = 0;
   for (const f of topics) {
     const text = readFileSync(join(root, v, f), 'utf8');
     const engines = text.match(/^engines: \[(.*)\]$/m)?.[1] || '';
+    const list = engines.split(',').map((e) => e.trim()).filter(Boolean);
+    list.forEach((e) => seen.add(e));
+    if (list.length > 1) dual += 1;
     const title = f.replace(/\.md$/, '');
     const cons = consensus(text);
     cons.forEach((r) => repoCount.set(r, (repoCount.get(r) || 0) + 1));
@@ -48,15 +53,29 @@ for (const v of readdirSync(root).filter((d) => existsSync(join(root, d, 'README
     .slice(0, 25)
     .map((x) => `| ${x.name} | ${x.stars} | ${x.pushed?.slice(0, 10)} | ${x.archived ? 'archived' : x.pushed < '2025-11-13' ? 'stale >1y' : 'active'} |`);
 
+  // Describe the corroboration that actually exists: a vertical where only one engine has reported
+  // must not claim two independent engines (Codex review, corpus PR #3).
+  const engineNames = [...seen].map((e) => e[0].toUpperCase() + e.slice(1));
+  const allDual = topics.length > 0 && dual === topics.length;
+  const basis = allDual
+    ? `two-engine Deep Research (${engineNames.join(' + ')}, Nov 2026)`
+    : dual === 0
+      ? `single-engine Deep Research (${engineNames.join(', ') || 'none yet'}, Nov 2026; no second engine has reported yet)`
+      : `Deep Research from ${engineNames.join(' + ')} (Nov 2026; ${dual} of ${topics.length} topics covered by both engines)`;
+  const knowledge = allDual
+    ? 'Your knowledge comes from two independent Deep Research engines run on the same questions in November 2026, merged into the dossiers beside this file.'
+    : dual === 0
+      ? `Your knowledge comes from a single Deep Research engine (${engineNames.join(', ')}); nothing here is corroborated by a second engine yet, so treat every claim as single-engine.`
+      : `Your knowledge comes from ${engineNames.join(' and ')} Deep Research; only ${dual} of ${topics.length} topics have both engines, so check the Engines column before calling anything consensus.`;
   const skill = [
     '---',
     `name: ${v}-expert`,
-    `description: Use when ${meta.when}. Grounds answers in two-engine Deep Research (Gemini + Perplexity, Nov 2026) with existence-checked sources.`,
+    `description: Use when ${meta.when}. Grounds answers in ${basis} with existence-checked sources.`,
     '---',
     '',
     `# ${v} expert`,
     '',
-    `Role: ${meta.role}. Your knowledge comes from two independent Deep Research engines run on the same questions in November 2026, merged into the dossiers beside this file. Treat that knowledge as unverified synthesis with checked sources: the repos and arXiv ids exist, but individual claims about them still need a primary-source check before they ship in anything public or priced.`,
+    `Role: ${meta.role}. ${knowledge} Treat that knowledge as unverified synthesis with checked sources: the repos and arXiv ids exist, but individual claims about them still need a primary-source check before they ship in anything public or priced.`,
     '',
     '## Trust boundary',
     '',
@@ -64,9 +83,11 @@ for (const v of readdirSync(root).filter((d) => existsSync(join(root, d, 'README
     '',
     '## How to work',
     '',
-    '1. Read the dossier for the topic at hand (table below). Start with "Consensus sources" and "Mental models", then the two engines\' stack recommendations side by side.',
-    `2. For depth or a specific claim, query the private corpus: \`research_search\` / \`research_ask\` on the starlight-research MCP with domain \`${meta.domain}\`. Both engines' full reports are indexed there (keys \`gemini-dr-*\` and \`perplexity-dr-*\`).`,
-    '3. Prefer what both engines agree on. Where they disagree, say so and show both positions rather than picking silently.',
+    '1. Read the dossier for the topic at hand (table below). Start with "Consensus sources" and "Mental models", then each engine\'s stack recommendation that the dossier holds.',
+    `2. For depth or a specific claim, query the private corpus: \`research_search\` / \`research_ask\` on the starlight-research MCP with domain \`${meta.domain}\`. Indexed reports for this vertical: ${[...seen].map((e) => `\`${e}-dr-*\``).join(', ') || 'none yet'}.`,
+    allDual || dual > 0
+      ? '3. Prefer what both engines agree on. Where they disagree, say so and show both positions rather than picking silently.'
+      : '3. With one engine only there is no consensus: present findings as single-engine and name what a second source would need to confirm.',
     '4. Before recommending a dependency, re-check it live (`gh repo view`, Context7 for API usage). Metadata below was measured on the build date and goes stale.',
     '5. Label every claim: verified (primary source you opened), consensus (both engines), single-engine, or your own judgment.',
     '',
