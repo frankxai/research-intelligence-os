@@ -8,6 +8,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { sanitize } from '../untrusted.mjs';
+import { VERTICAL_DOMAIN } from '../vertical-domains.mjs';
 
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = join(process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research'), 'gemini');
@@ -30,12 +31,13 @@ const q = JSON.parse(readFileSync(join(here, 'queue.json'), 'utf8'));
 let n = 0;
 for (const f of readdirSync(join(here, 'reports')).filter((x) => x.endsWith('.md') && !x.endsWith('.chat.md'))) {
   const id = f.replace(/\.md$/, '');
-  const domain = DOMAIN[id.slice(0, 5)];
+  const item = q.items.find((x) => x.id === id) || {};
+  // Exact topic number first (kb-160 must not match kb-16), then the item's vertical.
+  const domain = DOMAIN[id.match(/^kb-\d+/)?.[0]] || VERTICAL_DOMAIN[item.vertical];
   if (!domain) { console.error(`no domain for ${id}`); continue; }
   const target = join(corpus, domain, `gemini-dr-${id}.md`);
   const rawBody = readFileSync(join(here, 'reports', f), 'utf8').replace(/^---[\s\S]*?\n---\n/, '');
   const body = sanitize(rawBody).text;
-  const item = q.items.find((x) => x.id === id) || {};
   const title = (body.match(/^#\s+(.+)$/m)?.[1] ?? id).trim();
   const fm = [
     '---',

@@ -13,7 +13,7 @@ const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'researc
 const out = join(here, 'packs');
 if (existsSync(out)) rmSync(out, { recursive: true });
 
-const verticals = readdirSync(join(here, 'verticals')).filter((v) => existsSync(join(here, 'verticals', v, 'SKILL.md')));
+const verticals = readdirSync(join(here, 'verticals')).filter((v) => existsSync(join(here, 'verticals', v, 'SKILL.md')) && existsSync(join(here, 'verticals', v, 'README.md')));
 const write = (p, text) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); };
 
 for (const v of verticals) {
@@ -28,7 +28,7 @@ for (const v of verticals) {
 write(join(out, 'antigravity', 'plugins', 'starlight-verticals', 'plugin.json'), JSON.stringify({
   name: 'starlight-verticals',
   version: '0.1.0',
-  description: 'Two-engine Deep Research expert skills (unverified synthesis, existence-checked sources).',
+  description: 'Deep Research expert skills from Gemini and Perplexity; each skill states its own engine coverage (unverified synthesis, existence-checked sources).',
 }, null, 2) + '\n');
 write(join(out, 'antigravity', 'plugins', 'starlight-verticals', 'mcp_config.json'), JSON.stringify({
   mcpServers: {

@@ -15,6 +15,11 @@ const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'researc
 const dirs = process.argv.slice(2).length ? process.argv.slice(2) : [join(here, 'gemini', 'reports'), join(here, 'perplexity', 'reports')];
 const regPath = join(here, 'sources-registry.json');
 const reg = existsSync(regPath) ? JSON.parse(readFileSync(regPath, 'utf8')) : { repos: {}, papers: {} };
+// Backfill canonical-name aliases for entries recorded before aliases were written.
+for (const [k, e] of Object.entries(reg.repos)) {
+  const c = e.status === 'exists' && e.name?.toLowerCase();
+  if (c && c !== k && !reg.repos[c]) reg.repos[c] = e;
+}
 
 const NOT_REPO = new Set(['orgs', 'topics', 'features', 'marketplace', 'sponsors', 'collections', 'settings', 'about', 'pricing', 'enterprise', 'login', 'apps', 'search', 'trending', 'advisories', 'repos', 'users', 'notifications']);
 const repoRe = /(?<![\w.])github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})/g;
@@ -36,7 +41,11 @@ for (const d of dirs) {
   }
 }
 
-const allRepos = [...new Set(reports.flatMap((r) => r.repos))].filter((r) => !reg.repos[r]);
+// Stars, push dates and archive flags drift; a successful lookup older than REFRESH_DAYS is redone so
+// generated skills and next-wave freshness checks do not act on stale metadata.
+const REFRESH_DAYS = Number(process.env.SOURCES_REFRESH_DAYS || 14);
+const stale = (e) => !e || (['exists', 'not-found'].includes(e.status) && (Date.now() - Date.parse(e.checked || 0)) / 86400000 > REFRESH_DAYS);
+const allRepos = [...new Set(reports.flatMap((r) => r.repos))].filter((r) => stale(reg.repos[r]));
 const allPapers = [...new Set(reports.flatMap((r) => r.papers))].filter((p) => !reg.papers[p]);
 console.log(`reports=${reports.length} new repos=${allRepos.length} new papers=${allPapers.length}`);
 
@@ -59,8 +68,13 @@ for (let i = 0; i < allRepos.length; i += 40) {
   const notFound = new Set((res.errors || []).filter((x) => x.type === 'NOT_FOUND').map((x) => x.path?.[0]));
   batch.forEach((r, k) => {
     const v = data[`r${k}`];
-    if (v) reg.repos[r] = { status: 'exists', name: v.nameWithOwner, stars: v.stargazerCount, pushed: v.pushedAt, archived: v.isArchived, license: v.licenseInfo?.spdxId || null, description: v.description, checked: new Date().toISOString() };
-    else if (notFound.has(`r${k}`)) reg.repos[r] = { status: 'not-found', checked: new Date().toISOString() };
+    if (v) {
+      reg.repos[r] = { status: 'exists', name: v.nameWithOwner, stars: v.stargazerCount, pushed: v.pushedAt, archived: v.isArchived, license: v.licenseInfo?.spdxId || null, description: v.description, checked: new Date().toISOString() };
+      // A renamed or transferred repo is rendered under its canonical name; dossier consumers look that
+      // name up, so register it as an alias of the same entry.
+      const canonical = v.nameWithOwner.toLowerCase();
+      if (canonical !== r) reg.repos[canonical] = reg.repos[r];
+    } else if (notFound.has(`r${k}`)) reg.repos[r] = { status: 'not-found', checked: new Date().toISOString() };
   });
 }
 
