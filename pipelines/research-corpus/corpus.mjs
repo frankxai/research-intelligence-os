@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, append
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sanitize } from './two-engine/untrusted.mjs';
 import {
   DEFAULT_PERSONAL_PATTERNS, briefMarkdown, catalogMarkdown, classify, corpusKey, dueDomains, frontMatter,
   importKey, localFrontMatter, staleDriveKeys, usageToday,
@@ -183,7 +184,10 @@ function cmdImport() {
   }
   const importedAt = new Date().toISOString();
   for (const file of files.map((f) => path.resolve(f))) {
-    const text = readFileSync(file, 'utf8');
+    // Deep Research reports are web-derived: they pass the same sanitiser as the two-engine ingest
+    // before they reach R2 and AI Search. Estate docs are the estate's own text and stay verbatim.
+    const raw = readFileSync(file, 'utf8');
+    const text = kind === 'deep-research' ? sanitize(raw).text : raw;
     const title = (text.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(file, '.md')).trim();
     const modified = statSync(file).mtime.toISOString();
     const commit = gitCommitFor(file);

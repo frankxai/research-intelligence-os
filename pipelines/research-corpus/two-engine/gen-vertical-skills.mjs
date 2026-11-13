@@ -12,6 +12,7 @@ import { VERTICAL_DOMAIN } from './vertical-domains.mjs';
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research');
 const root = join(here, 'verticals');
+const corpusDir = join(here, 'corpus');
 const reg = JSON.parse(readFileSync(join(here, 'sources-registry.json'), 'utf8'));
 
 const META = {
@@ -34,8 +35,15 @@ for (const v of readdirSync(root).filter((d) => existsSync(join(root, d, 'README
   const topicRows = [];
   const repoCount = new Map();
   const seen = new Set();
+  const domains = new Set();
   let dual = 0;
   for (const f of topics) {
+    const id = f.replace(/\.md$/, '');
+    // Reports of one vertical can sit in several corpus domains (each engine's ingest routes by its
+    // own table), so the skill names every domain that actually holds one of its reports.
+    for (const d of existsSync(corpusDir) ? readdirSync(corpusDir) : []) {
+      if (existsSync(join(corpusDir, d, `gemini-dr-${id}.md`)) || existsSync(join(corpusDir, d, `perplexity-dr-${id}.md`))) domains.add(d);
+    }
     const text = readFileSync(join(root, v, f), 'utf8');
     const engines = text.match(/^engines: \[(.*)\]$/m)?.[1] || '';
     const list = engines.split(',').map((e) => e.trim()).filter(Boolean);
@@ -84,7 +92,7 @@ for (const v of readdirSync(root).filter((d) => existsSync(join(root, d, 'README
     '## How to work',
     '',
     '1. Read the dossier for the topic at hand (table below). Start with "Consensus sources" and "Mental models", then each engine\'s stack recommendation that the dossier holds.',
-    `2. For depth or a specific claim, query the private corpus: \`research_search\` / \`research_ask\` on the starlight-research MCP with domain \`${meta.domain}\`. Indexed reports for this vertical: ${[...seen].map((e) => `\`${e}-dr-*\``).join(', ') || 'none yet'}.`,
+    `2. For depth or a specific claim, query the private corpus: \`research_search\` / \`research_ask\` on the starlight-research MCP with ${domains.size > 1 ? 'domains' : 'domain'} ${(domains.size ? [...domains].sort() : [meta.domain]).map((d) => `\`${d}\``).join(', ')}${domains.size > 1 ? ' (this vertical\'s reports are filed under each)' : ''}. Indexed reports for this vertical: ${[...seen].map((e) => `\`${e}-dr-*\``).join(', ') || 'none yet'}.`,
     allDual || dual > 0
       ? '3. Prefer what both engines agree on. Where they disagree, say so and show both positions rather than picking silently.'
       : '3. With one engine only there is no consensus: present findings as single-engine and name what a second source would need to confirm.',
