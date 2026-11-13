@@ -189,7 +189,7 @@ function cmdImport() {
     const commit = gitCommitFor(file);
     const top = spawnSync('git', ['-C', path.dirname(file), 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
     const repoRoot = top.status === 0 ? top.stdout.trim() : null;
-    const target = path.join(P.corpus, importKey({ domain, sourcePath: file, repoRoot }));
+    const target = path.join(P.corpus, importKey({ domain, sourcePath: file, repoRoot, engine: flag('engine') }));
     writeAtomic(target, localFrontMatter({ title, sourcePath: file, commit, domain, kind, modified }, importedAt) + text);
     console.log(`${commit ? 'committed' : 'DRAFT    '} ${path.relative(P.corpus, target)}`);
   }

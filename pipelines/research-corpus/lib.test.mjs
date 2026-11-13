@@ -137,6 +137,21 @@ test('the brief degrades honestly when catalogs are unavailable', () => {
   assert.match(md, /No app reading recorded yet/);
 });
 
+test('a deep-research import is labelled AI synthesis even when committed', () => {
+  const base = { title: 'kb-01', sourcePath: 'C:/x/reports/kb-01.md', domain: 'ai-models-platforms', kind: 'deep-research', modified: '2026-11-13T00:00:00Z' };
+  assert.match(localFrontMatter({ ...base, commit: null }, 'now'), /verification: unverified-ai-synthesis/);
+  assert.match(localFrontMatter({ ...base, commit: 'abc123' }, 'now'), /verification: unverified-ai-synthesis/);
+});
+
+test('importKey with an engine keeps two engines\' same-named reports apart', () => {
+  const g = importKey({ domain: 'ai-for-science', sourcePath: 'C:/r/gemini/reports/kb-11-ai-chemistry.md', repoRoot: null, engine: 'gemini' });
+  const p = importKey({ domain: 'ai-for-science', sourcePath: String.raw`C:\r\perplexity\reports\kb-11-ai-chemistry.md`, repoRoot: null, engine: 'perplexity' });
+  assert.equal(g, 'ai-for-science/gemini-dr-kb-11-ai-chemistry.md');
+  assert.equal(p, 'ai-for-science/perplexity-dr-kb-11-ai-chemistry.md');
+  assert.notEqual(importKey({ domain: 'ai-for-science', sourcePath: 'C:/r/gemini/reports/kb-11-ai-chemistry.md', repoRoot: null }),
+    importKey({ domain: 'ai-for-science', sourcePath: 'C:/r/gemini/reports/kb-11-ai-chemistry.md', repoRoot: null, engine: 'gemini' }));
+});
+
 test('importKey keeps two README files from different repos apart', () => {
   const a = importKey({ domain: 'business-strategy', sourcePath: String.raw`C:\r\alpha\README.md`, repoRoot: 'C:/r/alpha' });
   const b = importKey({ domain: 'business-strategy', sourcePath: 'C:/r/beta/README.md', repoRoot: 'C:/r/beta' });
