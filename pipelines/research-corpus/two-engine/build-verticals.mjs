@@ -48,7 +48,10 @@ function sections(body) {
 
 const repoRe = /(?<![\w.])github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})/g;
 const arxivRe = /arxiv\.org\/(?:abs|pdf|html)\/(\d{4}\.\d{4,5})/g;
-const repos = (t) => new Set([...t.matchAll(repoRe)].map((m) => `${m[1]}/${m[2].replace(/\.git$/, '').replace(/[.)]+$/, '')}`.toLowerCase()).filter((r) => reg.repos[r]?.status === 'exists'));
+// Canonical identity (renames and transfers resolved), so an old slug in one engine and the new slug
+// in the other still count as consensus.
+const repos = (t) => new Set([...t.matchAll(repoRe)].map((m) => `${m[1]}/${m[2].replace(/\.git$/, '').replace(/[.)]+$/, '')}`.toLowerCase())
+  .filter((r) => reg.repos[r]?.status === 'exists').map((r) => { const c = reg.repos[r].name?.toLowerCase(); return c && reg.repos[c] ? c : r; }));
 const papers = (t) => new Set([...t.matchAll(arxivRe)].map((m) => m[1]));
 
 const topics = new Map();
