@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 const here = process.env.PERPLEXITY_HOME || join(homedir(), '.starlight', 'research', 'perplexity');
 const reportsDir = join(here, 'reports');
 const outDir = join(here, 'verticals');
+mkdirSync(outDir, { recursive: true });
 
 const KEEP = [
   ['summary', /^(executive|summary)/i],
