@@ -17,7 +17,8 @@ const ENGINES = ['gemini', 'perplexity'];
 const reg = JSON.parse(readFileSync(join(here, 'sources-registry.json'), 'utf8'));
 
 const SECTIONS = [
-  ['oss', /^#{2,3} .*(OSS|GitHub project|open-source project)/i],
+  // Word boundaries: unanchored /OSS/i matched "Across" in a heading and grabbed the wrong section.
+  ['oss', /^#{2,3} .*(\bOSS\b|\bGitHub projects?\b|\bopen-source projects?\b)/i],
   ['papers', /^#{2,3} .*(papers?)\b/i],
   ['models', /^#{2,3} .*(mental model|frameworks practitioners)/i],
   ['stack', /^#{2,3} .*(stack recommendation|solo founder)/i],
