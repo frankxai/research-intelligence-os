@@ -49,7 +49,8 @@ for (const [vertical, rs] of Object.entries(byVertical)) {
       if (s) lines.push(s.text.trim().replace(/^## /, '### '), '');
     }
     // Take the whole name segment, then drop only a trailing .git, so site.github.io stays intact.
-    for (const m of r.body.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)/g)) {
+    // Host must be exactly github.com (or www.), so gist.github.com and raw.githubusercontent paths are not repos.
+    for (const m of r.body.matchAll(/(?<![\w.-])(?:https?:\/\/)?(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+)/g)) {
       const repo = `${m[1]}/${m[2].replace(/\.git$/i, '').replace(/\.+$/, '')}`.toLowerCase();
       if (['orgs', 'topics', 'features', 'settings', 'search'].includes(m[1].toLowerCase())) continue;
       const e = oss.get(repo) || { repo, reports: new Set(), verticals: new Set() };

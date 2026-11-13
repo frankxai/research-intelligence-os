@@ -10,12 +10,16 @@ if (!file || !id || !url) { console.error('usage: harvest.mjs <file> <id> <url> 
 const raw = readFileSync(file.replace(/^\\\\\?\\/, ''), 'utf8');
 const lit = raw.slice(raw.indexOf('return: ') + 8).trim();
 let text = JSON.parse(lit);
+const marked = text.includes('=====REPORT-START=====');
 text = text.replace(/^[\s\S]*?=====REPORT-START=====\n/, '').replace(/\n=====REPORT-END=====$/, '');
 text = text.replace(/^\[UNTRUSTED_PAGE_CONTENT[^\n]*\n/, '').replace(/\n\[END_UNTRUSTED_PAGE_CONTENT[^\]]*\]\s*$/, '');
 
-// Sidebar (teammates, projects, recents) precedes the session; recents end with "View all".
-const cut = text.indexOf('View all');
-if (cut > -1 && cut < 30000) text = text.slice(cut + 'View all'.length);
+// Unmarked page dumps start with the sidebar (teammates, projects, recents), which ends with "View all".
+// Marked reports are already bounded, and their own text may say "View all".
+if (!marked) {
+  const cut = text.indexOf('View all');
+  if (cut > -1 && cut < 30000) text = text.slice(cut + 'View all'.length);
+}
 text = text.replace(/(Computer)+\s*$/, '').trim();
 
 const words = text.split(/\s+/).length;

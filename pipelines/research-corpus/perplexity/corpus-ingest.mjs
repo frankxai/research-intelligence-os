@@ -10,7 +10,8 @@ import { execFileSync } from 'node:child_process';
 
 // Private data lives outside the repo; this public code only reads and writes there.
 const here = process.env.PERPLEXITY_HOME || join(homedir(), '.starlight', 'research', 'perplexity');
-const HOME = join(homedir(), '.starlight', 'research');
+// Same override as corpus.mjs, so the push reads the corpus this script writes.
+const HOME = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research');
 const CORPUS = join(HOME, 'corpus');
 const MANIFEST = join(HOME, 'push-manifest.json');
 const BUCKET = 'starlight-research-corpus';
