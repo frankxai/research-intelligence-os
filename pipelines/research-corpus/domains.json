@@ -5,6 +5,8 @@
       "keywords": ["agentic income", "income stream", "affiliate", "monetiz", "polar.sh", "polar checkout", "merchant of record", "whop", "gumroad", "lemon squeezy", "skill pack", "product and whop", "digital product pricing", "revenue ledger", "passive income"] },
     { "id": "arcanea", "name": "Arcanea platform, product and strategy research (not canon)", "staleDays": 30,
       "keywords": ["arcanea", "arcanean"] },
+    { "id": "ai-for-science", "name": "AI for chemistry, physics, biology and materials science", "staleDays": 30,
+      "keywords": ["ai for science", "ai for chemistry", "ai for physics", "ai for biology", "materials science", "protein", "genomic", "self-driving lab", "retrosynthesis"] },
     { "id": "ai-models-platforms", "name": "AI models, agent runtimes and platforms", "staleDays": 7,
       "keywords": ["model", "agent", "llm", "cloudflare", "vercel", "knowledge layer", "multi-agent", "orchestrator", "mcp", "harness", "telemetry", "prompt", "ai for science"] },
     { "id": "github-ecosystem", "name": "GitHub ecosystem and notable repositories", "staleDays": 14,
