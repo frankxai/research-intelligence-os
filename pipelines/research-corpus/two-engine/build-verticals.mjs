@@ -64,8 +64,11 @@ for (const engine of ENGINES) {
     const body = s.text;
     // A harvester may already have sanitised the report and recorded its count in front matter;
     // that text is gone from the body, so add the recorded count rather than losing it.
-    const flagged = s.flagged + (Number(fm.injection_flags) || 0);
-    const hidden = s.hidden + (Number(fm.hidden_chars) || 0);
+    // Fail closed: only a non-negative integer is accepted; a malformed or negative value counts as
+    // one flag instead of silently cancelling the scan's own count.
+    const recorded = (v) => (v === undefined ? 0 : /^\d+$/.test(v) ? Number(v) : 1);
+    const flagged = s.flagged + recorded(fm.injection_flags);
+    const hidden = s.hidden + (/^\d+$/.test(fm.hidden_chars ?? '') ? Number(fm.hidden_chars) : 0);
     const t = topics.get(id) || { id, vertical: fm.vertical || 'unsorted', engines: {} };
     t.engines[engine] = { body, flagged, hidden, words: body.split(/\s+/).length, sections: sections(body), repos: repos(body), papers: papers(body) };
     topics.set(id, t);
