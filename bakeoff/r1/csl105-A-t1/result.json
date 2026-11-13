@@ -1,0 +1,18 @@
+{
+  "task": "csl105",
+  "arm": "A",
+  "trial": 1,
+  "model": "claude-sonnet-5-5",
+  "started_utc": "2026-11-13T21:47:00Z",
+  "finished_utc": "2026-11-13T21:48:30Z",
+  "tests_run": [
+    "python3 -m unittest discover -s scripts/tests -p 'test_*.py' : 15 passed, 0 failed (6 new in test_validate_skills.py)",
+    "node --test : 382 passed, 0 failed (first run had 3 failures in absorb.test.mjs because fixtures used name 'absorb-probe' in dir 'probe'; fixtures fixed)",
+    "python3 scripts/validate_skills.py : OK, 122 skills",
+    "python3 scripts/check_links.py : OK",
+    "python3 scripts/generate_catalog.py --check : OK"
+  ],
+  "self_assessment": "done",
+  "subagents_used": 0,
+  "notes": "Validator now enforces name==parent dir, name regex ^[a-z0-9]+(-[a-z0-9]+)*$ (rejects leading/trailing/consecutive hyphens), compatibility<=500. Updated CONTRIBUTING.md, spec/README.md, README.md, validator docstring. Fixed absorb test fixtures. Did not run generate_site/check_counts/build-catalog checks."
+}
