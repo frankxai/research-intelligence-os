@@ -1,0 +1,37 @@
+diff --git a/scripts/absorb.mjs b/scripts/absorb.mjs
+index 9fd28b7..0f04811 100755
+--- a/scripts/absorb.mjs
++++ b/scripts/absorb.mjs
+@@ -21,10 +21,13 @@
+  */
+ import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, cpSync } from 'node:fs';
+ import { spawnSync } from 'node:child_process';
+-import { join, dirname, relative } from 'node:path';
++import { join, dirname, relative, sep } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ 
+ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
++// Repo-relative paths are printed and recorded in PROVENANCE.json; keep them
++// forward-slashed on every platform (Windows relative() yields backslashes).
++const rel = (p) => relative(REPO, p).split(sep).join('/');
+ const args = process.argv.slice(2);
+ const opt = (n, d = null) => { const a = args.find((x) => x.startsWith(`--${n}=`)); return a ? a.slice(n.length + 3) : d; };
+ const DRY = args.includes('--dry-run');
+@@ -78,7 +81,7 @@ gate(2, shaOk && repoOk && changeOk,
+ const stagedDir = join(REPO, staging, domain, name);
+ const stagedSkill = join(stagedDir, 'SKILL.md');
+ if (!existsSync(stagedSkill)) {
+-  console.error(`refused: nothing staged at ${relative(REPO, stagedSkill)} — stage the artifact you have READ, not one fetched blind.`);
++  console.error(`refused: nothing staged at ${rel(stagedSkill)} — stage the artifact you have READ, not one fetched blind.`);
+   process.exit(2);
+ }
+ const body = readFileSync(stagedSkill, 'utf8');
+@@ -127,7 +130,7 @@ let nearest = { path: null, score: 0 };
+ if (mine.size >= MIN_SHINGLES) {
+   for (const p of existingSkills()) {
+     const s = jaccard(mine, shingles(readFileSync(p, 'utf8'), width));
+-    if (s > nearest.score) nearest = { path: relative(REPO, p), score: s };
++    if (s > nearest.score) nearest = { path: rel(p), score: s };
+   }
+ }
+ const comparable = mine.size >= MIN_SHINGLES;

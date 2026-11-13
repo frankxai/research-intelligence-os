@@ -1,0 +1,15 @@
+{
+  "task": "csl107",
+  "arm": "A",
+  "trial": 1,
+  "model": "claude-sonnet-5-5",
+  "started_utc": "2026-11-13T21:43:36Z",
+  "finished_utc": "2026-11-13T21:44:18Z",
+  "tests_run": [
+    "node --test scripts/tests/absorb.test.mjs: 14 tests, 14 pass, 0 fail",
+    "node --test (full suite): 395 tests, 390 pass, 0 fail, 5 skipped"
+  ],
+  "self_assessment": "done",
+  "subagents_used": 0,
+  "notes": "Added rel() helper in scripts/absorb.mjs (relative(REPO,p) split on path.sep, joined with '/') and used it for the missing-staging message and the gate-3 nearest path, which also feeds PROVENANCE.json distinctness.nearest. Not verified on a real Windows host; Linux tests pass."
+}
