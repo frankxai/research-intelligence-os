@@ -1,0 +1,15 @@
+{
+  "task": "csl107",
+  "arm": "B",
+  "trial": 1,
+  "model": "claude-sonnet-5-5",
+  "started_utc": "2026-11-13T21:44:36Z",
+  "finished_utc": "2026-11-13T21:46:01Z",
+  "tests_run": [
+    "node --test scripts/tests/absorb.test.mjs (maker run in /tmp/work): 14 tests, 14 pass, 0 fail",
+    "node --test scripts/tests/absorb.test.mjs (independent verifier run in /tmp/work): 14 tests, 14 pass, 0 fail"
+  ],
+  "self_assessment": "done",
+  "subagents_used": 3,
+  "notes": "Planner, maker, verifier; no fix round needed. Added toPosix = p.replaceAll('\\\\','/') in scripts/absorb.mjs and wrapped the two relative(REPO, ...) sites (missing-staging diagnostic; nearest.path, which feeds gate-3 output and PROVENANCE.json distinctness.nearest). Tests ran on Linux only, so the Windows behaviour is verified by code reading, not execution. Full node --test suite and other validators were not run."
+}
