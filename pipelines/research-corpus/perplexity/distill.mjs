@@ -38,7 +38,9 @@ const reports = files.map((f) => ({ file: f, ...parse(readFileSync(join(reportsD
   .filter((r) => Number(r.fm.words) >= 3000 && Number(r.fm.inline_links) >= 20);
 
 const oss = new Map();
-const byVertical = Object.groupBy(reports, (r) => r.fm.vertical || 'unsorted');
+// Vertical comes from AI-written front matter and becomes a directory name, so it must be one plain segment.
+const SAFE = /^(?!\.{1,2}$)[\w.-]+$/;
+const byVertical = Object.groupBy(reports, (r) => (SAFE.test(r.fm.vertical || '') ? r.fm.vertical : 'unsorted'));
 
 for (const [vertical, rs] of Object.entries(byVertical)) {
   const lines = [`# ${vertical} knowledge pack`, '',

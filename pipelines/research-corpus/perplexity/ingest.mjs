@@ -1,11 +1,13 @@
 // Moves a Perplexity artifact download into reports/ with provenance.
 // usage: node ingest.mjs "<downloaded file name in ~/Downloads>" <id> <sessionUrl> <vertical>
 import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, basename } from 'node:path';
 import { homedir } from 'node:os';
 
 const [, , name, id, url, vertical = 'unsorted'] = process.argv;
 if (!name || !id || !url) { console.error('usage: ingest.mjs <file> <id> <url> [vertical]'); process.exit(2); }
+const SAFE = /^(?!\.{1,2}$)[\w.-]+$/;
+if (!SAFE.test(id) || !SAFE.test(vertical) || name !== basename(name)) { console.error('id, vertical and file must be plain names'); process.exit(2); }
 const src = join(homedir(), 'Downloads', name);
 if (!existsSync(src)) { console.error(`missing ${src}`); process.exit(1); }
 

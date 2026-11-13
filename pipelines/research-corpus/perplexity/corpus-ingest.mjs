@@ -14,7 +14,8 @@ const here = process.env.PERPLEXITY_HOME || join(homedir(), '.starlight', 'resea
 const HOME = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research');
 const CORPUS = join(HOME, 'corpus');
 const MANIFEST = join(HOME, 'push-manifest.json');
-const BUCKET = 'starlight-research-corpus';
+const BUCKET = process.env.RESEARCH_BUCKET || 'starlight-research-corpus';
+const SAFE = /^(?!\.{1,2}$)[\w.-]+$/;
 
 // Report vertical -> corpus domain (domains.json ids).
 const DOMAIN = {
@@ -36,6 +37,8 @@ for (const f of readdirSync(join(here, 'reports')).filter((f) => f.endsWith('.md
   const text = readFileSync(join(here, 'reports', f), 'utf8');
   const meta = fm(text);
   if (Number(meta.words) < 3000 || Number(meta.inline_links) < 20) continue;
+  // Report metadata is AI-written; an id or vertical must be one plain path segment.
+  if (!SAFE.test(meta.id || '') || !SAFE.test(meta.vertical || '')) { console.error(`skip ${f}: unsafe id or vertical`); continue; }
   const domain = DOMAIN_OVERRIDE[meta.id] || DOMAIN[meta.vertical];
   if (!domain) { console.error(`skip ${f}: no domain for vertical ${meta.vertical}`); continue; }
   const body = text.replace(/^---\n[\s\S]*?\n---\n/, '');
