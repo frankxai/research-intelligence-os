@@ -6,7 +6,7 @@
 // Consensus across independent engines plus a passing existence check is the confidence signal an
 // expert agent should lean on; single-engine claims stay flagged until a human or verifier confirms.
 // usage: node build-verticals.mjs   (run verify-sources.mjs first)
-import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { sanitize, inert, UNTRUSTED_NOTE } from './untrusted.mjs';
@@ -60,7 +60,12 @@ for (const engine of ENGINES) {
     const { fm, body: rawBody } = frontMatter(readFileSync(join(dir, f), 'utf8'));
     // Sanitise the whole report before splitting it, so section boundaries are found in the same
     // text that ends up in the dossier (no hidden characters or comments shifting a heading).
-    const { text: body, flagged, hidden } = sanitize(rawBody);
+    const s = sanitize(rawBody);
+    const body = s.text;
+    // A harvester may already have sanitised the report and recorded its count in front matter;
+    // that text is gone from the body, so add the recorded count rather than losing it.
+    const flagged = s.flagged + (Number(fm.injection_flags) || 0);
+    const hidden = s.hidden + (Number(fm.hidden_chars) || 0);
     const t = topics.get(id) || { id, vertical: fm.vertical || 'unsorted', engines: {} };
     t.engines[engine] = { body, flagged, hidden, words: body.split(/\s+/).length, sections: sections(body), repos: repos(body), papers: papers(body) };
     topics.set(id, t);
@@ -76,6 +81,17 @@ const fmtPaper = (p) => {
   const st = v?.status === 'exists' ? `${v.title} (${v.year ?? ''})` : v?.status === 'not-found' ? '**not found**' : 'unchecked';
   return `- [arXiv:${p}](https://arxiv.org/abs/${p}) ${st}`;
 };
+
+// Dossiers are fully derived: clear the previous build so a withdrawn or re-routed report cannot
+// leave a stale dossier for gen-vertical-skills or next-wave to pick up. Hand-written files
+// (SKILL.md is regenerated; docs-*.md briefs are kept) are not touched.
+const vroot = join(here, 'verticals');
+if (existsSync(vroot)) {
+  for (const v of readdirSync(vroot)) {
+    const d = join(vroot, v);
+    for (const f of existsSync(d) ? readdirSync(d) : []) if (/^kb-.*\.md$/.test(f) || f === 'README.md') rmSync(join(d, f));
+  }
+}
 
 const byVertical = new Map();
 for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {

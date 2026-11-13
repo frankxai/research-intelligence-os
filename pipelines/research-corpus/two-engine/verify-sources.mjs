@@ -46,20 +46,21 @@ for (let i = 0; i < allRepos.length; i += 40) {
     const [o, n] = r.split('/');
     return `r${k}: repository(owner: ${JSON.stringify(o)}, name: ${JSON.stringify(n)}) { nameWithOwner stargazerCount pushedAt isArchived description licenseInfo { spdxId } }`;
   }).join('\n');
-  let data = {};
+  let res = {};
   try {
-    const out = execFileSync('gh', ['api', 'graphql', '-f', `query=query { ${body} }`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    data = JSON.parse(out).data || {};
+    res = JSON.parse(execFileSync('gh', ['api', 'graphql', '-f', `query=query { ${body} }`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   } catch (e) {
     // GraphQL returns partial data plus errors for missing repos; gh exits non-zero but prints JSON.
-    const out = e.stdout?.toString() || '';
-    try { data = JSON.parse(out).data || {}; } catch { console.error(`batch ${i} failed: ${String(e.stderr || e).slice(0, 200)}`); continue; }
+    try { res = JSON.parse(e.stdout?.toString() || ''); } catch { console.error(`batch ${i} failed: ${String(e.stderr || e).slice(0, 200)}`); continue; }
   }
+  const data = res.data || {};
+  // Only a per-alias NOT_FOUND error proves absence. Rate limits and other errors leave the repo
+  // unrecorded, so the next run retries it instead of caching a false negative.
+  const notFound = new Set((res.errors || []).filter((x) => x.type === 'NOT_FOUND').map((x) => x.path?.[0]));
   batch.forEach((r, k) => {
     const v = data[`r${k}`];
-    reg.repos[r] = v
-      ? { status: 'exists', name: v.nameWithOwner, stars: v.stargazerCount, pushed: v.pushedAt, archived: v.isArchived, license: v.licenseInfo?.spdxId || null, description: v.description, checked: new Date().toISOString() }
-      : { status: 'not-found', checked: new Date().toISOString() };
+    if (v) reg.repos[r] = { status: 'exists', name: v.nameWithOwner, stars: v.stargazerCount, pushed: v.pushedAt, archived: v.isArchived, license: v.licenseInfo?.spdxId || null, description: v.description, checked: new Date().toISOString() };
+    else if (notFound.has(`r${k}`)) reg.repos[r] = { status: 'not-found', checked: new Date().toISOString() };
   });
 }
 

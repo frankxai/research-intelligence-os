@@ -11,7 +11,7 @@ import { sanitize } from '../untrusted.mjs';
 
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = join(process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research'), 'gemini');
-const corpus = join(homedir(), '.starlight', 'research', 'corpus');
+const corpus = join(process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research'), 'corpus');
 
 // Report vertical/topic -> corpus domain (domains.json ids, plus the ai-for-science folder in use).
 const DOMAIN = {
