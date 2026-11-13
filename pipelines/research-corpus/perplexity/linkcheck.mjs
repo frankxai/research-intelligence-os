@@ -3,8 +3,10 @@
 import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { lookup as dnsLookup } from 'node:dns';
+import { isIP, BlockList } from 'node:net';
+import http from 'node:http';
+import https from 'node:https';
 
 // Private data lives outside the repo; this public code only reads and writes there.
 const here = process.env.PERPLEXITY_HOME || join(homedir(), '.starlight', 'research', 'perplexity');
@@ -22,42 +24,54 @@ const prior = existsSync(outFile) ? JSON.parse(readFileSync(outFile, 'utf8')) : 
 // fetched, and redirects are followed by hand so every hop is checked; otherwise a report could
 // point this script at loopback services (the local tool plane) or cloud metadata endpoints.
 const MAX_REDIRECTS = 5;
-const PRIVATE_V4 = [
-  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
-  ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3],
-];
-const v4ToInt = (ip) => ip.split('.').reduce((n, o) => (n << 8) + Number(o), 0) >>> 0;
-const isPublicIp = (ip) => {
-  const mapped = ip.toLowerCase().match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return isPublicIp(mapped[1]);
-  if (isIP(ip) === 4) {
-    const n = v4ToInt(ip);
-    return !PRIVATE_V4.some(([base, bits]) => (n >>> (32 - bits)) === (v4ToInt(base) >>> (32 - bits)));
-  }
-  const v6 = ip.toLowerCase();
-  return !(v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || /^ff/.test(v6));
+const DENY = new BlockList();
+for (const [net, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
+  ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3]]) DENY.addSubnet(net, bits, 'ipv4');
+// IPv4-embedding prefixes (::/96 compat, 64:ff9b NAT64, 2002 6to4, 2001::/32 Teredo) are refused outright:
+// a cited source has no reason to use them and each can smuggle a private IPv4 target.
+for (const [net, bits] of [['::', 96], ['::1', 128], ['64:ff9b::', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001::', 32],
+  ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8]]) DENY.addSubnet(net, bits, 'ipv6');
+// BlockList.check on an ipv6 address also matches IPv4-mapped (::ffff:a.b.c.d) forms against the ipv4 rules.
+const isPublicIp = (ip) => !DENY.check(ip, isIP(ip) === 6 ? 'ipv6' : 'ipv4');
+
+// Resolution happens inside the socket connect, and only a validated address is handed back,
+// so the request goes to exactly the address that was checked (no DNS-rebinding window).
+const safeLookup = (host, opts, cb) => {
+  dnsLookup(host, { ...opts, all: true }, (err, addrs) => {
+    if (err) return cb(err);
+    const ok = addrs.filter((a) => isPublicIp(a.address));
+    if (!ok.length || ok.length !== addrs.length) return cb(Object.assign(new Error('not-public'), { code: 'ENOTPUBLIC' }));
+    return opts.all ? cb(null, ok) : cb(null, ok[0].address, ok[0].family);
+  });
 };
-const isPublicUrl = async (raw) => {
-  let u;
-  try { u = new URL(raw); } catch { return false; }
-  if (!['http:', 'https:'].includes(u.protocol)) return false;
+
+const request = (url, method, signal) => new Promise((resolve, reject) => {
+  const u = new URL(url);
   const host = u.hostname.replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal')) return false;
-  if (isIP(host)) return isPublicIp(host);
-  try {
-    const addrs = await lookup(host, { all: true });
-    return addrs.length > 0 && addrs.every((a) => isPublicIp(a.address));
-  } catch { return false; }
-};
+  if (isIP(host) && !isPublicIp(host)) return reject(Object.assign(new Error('not-public'), { code: 'ENOTPUBLIC' }));
+  const lib = u.protocol === 'https:' ? https : http;
+  const req = lib.request(u, { method, lookup: safeLookup, signal, headers: { 'user-agent': 'Mozilla/5.0 linkcheck' } }, (res) => {
+    res.resume();
+    resolve({ status: res.statusCode, location: res.headers.location });
+  });
+  req.on('error', reject);
+  req.end();
+});
 
 const fetchChecked = async (url, method, signal) => {
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    if (!(await isPublicUrl(current))) return { status: 'not-public' };
-    const r = await fetch(current, { method, redirect: 'manual', signal, headers: { 'user-agent': 'Mozilla/5.0 linkcheck' } });
-    const next = r.headers.get('location');
-    if (r.status < 300 || r.status >= 400 || !next) return { status: r.status };
-    current = new URL(next, current).href;
+    const u = new URL(current);
+    if (!['http:', 'https:'].includes(u.protocol) || u.hostname === 'localhost' || /\.(localhost|internal)$/.test(u.hostname)) {
+      return { status: 'not-public' };
+    }
+    let r;
+    try { r = await request(current, method, signal); } catch (e) {
+      if (e.code === 'ENOTPUBLIC') return { status: 'not-public' };
+      throw e;
+    }
+    if (r.status < 300 || r.status >= 400 || !r.location) return { status: r.status };
+    current = new URL(r.location, current).href;
   }
   return { status: 'too-many-redirects' };
 };
