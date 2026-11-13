@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { VERTICAL_DOMAIN } from './vertical-domains.mjs';
 
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research');
@@ -14,12 +15,12 @@ const root = join(here, 'verticals');
 const reg = JSON.parse(readFileSync(join(here, 'sources-registry.json'), 'utf8'));
 
 const META = {
-  'agent-infrastructure': { domain: 'ai-models-platforms', role: 'agent infrastructure architect', when: 'designing agent knowledge layers, memory, retrieval, multi-agent orchestration, agent security, evals, or choosing between Claude Code, Cloudflare Agents, Vercel AI SDK/Workflow and Google ADK' },
-  'agentic-products': { domain: 'business-strategy', role: 'agentic product strategist', when: 'scoping MCP servers or agent-facing data products, pricing them, planning an agent-built venture, or packaging playbooks and managed agent teams' },
-  design: { domain: 'digital-product-design', role: 'product design and agentic UI lead', when: 'designing agent interfaces (AG-UI, MCP Apps, generative UI), human-in-the-loop flows, or judging whether a surface meets a world-class design bar' },
-  engineering: { domain: 'web-design', role: 'web performance engineer', when: 'diagnosing Core Web Vitals, choosing rendering and caching strategy on Vercel or Cloudflare, or setting performance budgets' },
-  growth: { domain: 'marketing', role: 'growth, journey and retention strategist', when: 'mapping customer journeys, onboarding and activation, CLV and retention, AI-search discovery, or community design for a product' },
-  science: { domain: 'ai-for-science', role: 'AI-for-science analyst (chemistry, physics, biology, materials)', when: 'assessing AI methods, models, datasets, autonomous labs or startup opportunities in a natural-science field' },
+  'agent-infrastructure': { role: 'agent infrastructure architect', when: 'designing agent knowledge layers, memory, retrieval, multi-agent orchestration, agent security, evals, or choosing between Claude Code, Cloudflare Agents, Vercel AI SDK/Workflow and Google ADK' },
+  'agentic-products': { role: 'agentic product strategist', when: 'scoping MCP servers or agent-facing data products, pricing them, planning an agent-built venture, or packaging playbooks and managed agent teams' },
+  design: { role: 'product design and agentic UI lead', when: 'designing agent interfaces (AG-UI, MCP Apps, generative UI), human-in-the-loop flows, or judging whether a surface meets a world-class design bar' },
+  engineering: { role: 'web performance engineer', when: 'diagnosing Core Web Vitals, choosing rendering and caching strategy on Vercel or Cloudflare, or setting performance budgets' },
+  growth: { role: 'growth, journey and retention strategist', when: 'mapping customer journeys, onboarding and activation, CLV and retention, AI-search discovery, or community design for a product' },
+  science: { role: 'AI-for-science analyst (chemistry, physics, biology, materials)', when: 'assessing AI methods, models, datasets, autonomous labs or startup opportunities in a natural-science field' },
 };
 
 const consensus = (text) => {
@@ -28,7 +29,7 @@ const consensus = (text) => {
 };
 
 for (const v of readdirSync(root).filter((d) => existsSync(join(root, d, 'README.md')))) {
-  const meta = META[v] || { domain: 'unrouted', role: `${v} expert`, when: `working on ${v}` };
+  const meta = { role: `${v} expert`, when: `working on ${v}`, ...META[v], domain: VERTICAL_DOMAIN[v] || 'unrouted' };
   const topics = readdirSync(join(root, v)).filter((f) => /^kb-.*\.md$/.test(f));
   const topicRows = [];
   const repoCount = new Map();

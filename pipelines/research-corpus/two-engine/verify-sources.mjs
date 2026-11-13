@@ -36,7 +36,11 @@ for (const d of dirs) {
   }
 }
 
-const allRepos = [...new Set(reports.flatMap((r) => r.repos))].filter((r) => !reg.repos[r]);
+// Stars, push dates and archive flags drift; a successful lookup older than REFRESH_DAYS is redone so
+// generated skills and next-wave freshness checks do not act on stale metadata.
+const REFRESH_DAYS = Number(process.env.SOURCES_REFRESH_DAYS || 14);
+const stale = (e) => !e || (e.status === 'exists' && (Date.now() - Date.parse(e.checked || 0)) / 86400000 > REFRESH_DAYS);
+const allRepos = [...new Set(reports.flatMap((r) => r.repos))].filter((r) => stale(reg.repos[r]));
 const allPapers = [...new Set(reports.flatMap((r) => r.papers))].filter((p) => !reg.papers[p]);
 console.log(`reports=${reports.length} new repos=${allRepos.length} new papers=${allPapers.length}`);
 

@@ -8,6 +8,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { sanitize } from '../untrusted.mjs';
+import { VERTICAL_DOMAIN } from '../vertical-domains.mjs';
 
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = join(process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research'), 'gemini');
@@ -24,11 +25,6 @@ const DOMAIN = {
   'kb-24': 'ai-for-science', 'kb-25': 'ai-for-science', 'kb-26': 'business-strategy', 'kb-27': 'ai-for-science',
   'kb-28': 'ai-for-science', 'kb-29': 'marketing', 'kb-36': 'ai-for-science', 'kb-37': 'business-strategy',
   'kb-38': 'ai-models-platforms', 'kb-39': 'ai-models-platforms',
-};
-const VERTICAL_DOMAIN = {
-  design: 'web-design', engineering: 'ai-models-platforms', growth: 'marketing', community: 'community',
-  'agent-infrastructure': 'ai-models-platforms', 'agentic-products': 'business-strategy',
-  science: 'ai-for-science', industry: 'business-strategy', investing: 'business-strategy',
 };
 
 const q = JSON.parse(readFileSync(join(here, 'queue.json'), 'utf8'));

@@ -128,7 +128,8 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
   for (const e of have.filter((x) => Object.keys(t.engines[x].sections).length === 0)) {
     const body = t.engines[e].body;
     const outline = body.split('\n').filter((l) => /^#{1,3} /.test(l)).slice(0, 40).join('\n');
-    const lead = body.replace(/^#[^\n]*\n/, '').split(/\n#{2} /)[0].split(/\s+/).slice(0, 450).join(' ');
+    // Skip every heading line, so a report that opens "# Title / ## Introduction" still yields prose.
+    const lead = body.split('\n').filter((l) => !/^#{1,6} /.test(l)).join('\n').trim().split(/\s+/).slice(0, 450).join(' ');
     out.push(`## Report digest (${e})`, '',
       `This ${e} report does not use the five-section format, so the sections below are empty. It holds ${t.engines[e].words} words: read the full report before concluding the corpus lacks evidence.`, '',
       UNTRUSTED_NOTE, '', '### Outline', '', inert(outline || '_no headings_'), '', '### Opening', '', inert(lead), '');
