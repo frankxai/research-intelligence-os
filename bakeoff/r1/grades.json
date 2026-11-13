@@ -1,0 +1,320 @@
+[
+ {
+  "task": "csl107",
+  "arm": "A",
+  "applies": true,
+  "diff": {
+   "files": 1,
+   "added": 6,
+   "removed": 3,
+   "prod_changed": true,
+   "files_list": [
+    "scripts/absorb.mjs"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 14,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 0,
+   "pass": 14,
+   "fail": 0
+  },
+  "full_suite": {
+   "node": {
+    "exit": 0,
+    "pass": 390,
+    "fail": 0
+   },
+   "python": {
+    "exit": 0,
+    "pass": 9,
+    "fail": 0
+   }
+  },
+  "notes": ""
+ },
+ {
+  "task": "csl107",
+  "arm": "B",
+  "applies": true,
+  "diff": {
+   "files": 1,
+   "added": 4,
+   "removed": 2,
+   "prod_changed": true,
+   "files_list": [
+    "scripts/absorb.mjs"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 14,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 0,
+   "pass": 14,
+   "fail": 0
+  },
+  "full_suite": {
+   "node": {
+    "exit": 0,
+    "pass": 390,
+    "fail": 0
+   },
+   "python": {
+    "exit": 0,
+    "pass": 9,
+    "fail": 0
+   }
+  },
+  "notes": ""
+ },
+ {
+  "task": "csl114",
+  "arm": "A",
+  "applies": true,
+  "diff": {
+   "files": 3,
+   "added": 172,
+   "removed": 5,
+   "prod_changed": true,
+   "files_list": [
+    "packs/estate-guard/hooks/estate-guard-gate.py",
+    "packs/estate-guard/skills/estate-guard/SKILL.md",
+    "packs/estate-guard/tests/test_hooks.py"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 105,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 1,
+   "pass": 87,
+   "fail": 5
+  },
+  "full_suite": {
+   "node": {
+    "exit": 0,
+    "pass": 402,
+    "fail": 0
+   },
+   "python": {
+    "exit": 0,
+    "pass": 9,
+    "fail": 0
+   }
+  },
+  "notes": "Hidden fails (5): scratch pass: rm -rf \"$TMPDIR/build\"; scratch pass: rm -rf ${TMPDIR}/build; scratch still ask: cd /tmp && rm -rf acos; cd /tmp/claude-0 && rm -rf acos; ln -s ~ /tmp/l && rm -rf /tmp/l/x. Some cases may be sensitive to this sandbox's TMPDIR/cwd (/tmp/claude-0)."
+ },
+ {
+  "task": "csl114",
+  "arm": "B",
+  "applies": true,
+  "diff": {
+   "files": 3,
+   "added": 223,
+   "removed": 6,
+   "prod_changed": true,
+   "files_list": [
+    "packs/estate-guard/hooks/estate-guard-gate.py",
+    "packs/estate-guard/skills/estate-guard/SKILL.md",
+    "packs/estate-guard/tests/test_hooks.py"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 113,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 1,
+   "pass": 84,
+   "fail": 8
+  },
+  "full_suite": {
+   "node": {
+    "exit": 0,
+    "pass": 402,
+    "fail": 0
+   },
+   "python": {
+    "exit": 0,
+    "pass": 9,
+    "fail": 0
+   }
+  },
+  "notes": "Hidden fails (8): ask: rm -rf node_modules; scratch pass: $TMPDIR/build and ${TMPDIR}/build; scratch still ask: rm -rf acos, cd /tmp && rm -rf acos, cd /tmp/claude-0 && rm -rf acos, rm -rf /tmp/a ./b, rm -rf /tmp/a; rm -rf b. Some cases may be sensitive to this sandbox's TMPDIR/cwd."
+ },
+ {
+  "task": "csl105",
+  "arm": "A",
+  "applies": true,
+  "diff": {
+   "files": 6,
+   "added": 80,
+   "removed": 16,
+   "prod_changed": true,
+   "files_list": [
+    "CONTRIBUTING.md",
+    "README.md",
+    "scripts/tests/absorb.test.mjs",
+    "scripts/tests/test_validate_skills.py",
+    "scripts/validate_skills.py",
+    "spec/README.md"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 14,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 1,
+   "pass": 20,
+   "fail": 1
+  },
+  "full_suite": {
+   "node": {
+    "exit": 1,
+    "pass": 388,
+    "fail": 1
+   },
+   "python": {
+    "exit": 0,
+    "pass": 15,
+    "fail": 0
+   }
+  },
+  "notes": "Hidden fail (1): validate-skills 'an unknown top-level key warns and points at metadata, without failing'. Full-suite node has the same 1 fail."
+ },
+ {
+  "task": "csl105",
+  "arm": "B",
+  "applies": true,
+  "diff": {
+   "files": 6,
+   "added": 103,
+   "removed": 16,
+   "prod_changed": true,
+   "files_list": [
+    "CONTRIBUTING.md",
+    "README.md",
+    "scripts/tests/absorb.test.mjs",
+    "scripts/tests/test_validate_skills.py",
+    "scripts/validate_skills.py",
+    "spec/README.md"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 14,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 1,
+   "pass": 19,
+   "fail": 2
+  },
+  "full_suite": {
+   "node": {
+    "exit": 1,
+    "pass": 387,
+    "fail": 2
+   },
+   "python": {
+    "exit": 0,
+    "pass": 18,
+    "fail": 0
+   }
+  },
+  "notes": "Hidden fails (2): validate-skills 'name must match the parent directory'; 'an unknown top-level key warns and points at metadata, without failing'. Full-suite node has same 2 fails."
+ },
+ {
+  "task": "csl89",
+  "arm": "A",
+  "applies": true,
+  "diff": {
+   "files": 1,
+   "added": 146,
+   "removed": 0,
+   "prod_changed": false,
+   "files_list": [
+    "scripts/tests/test_generate_catalog.py"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 24,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 0,
+   "pass": 9,
+   "fail": 0
+  },
+  "full_suite": {
+   "node": {
+    "exit": 0,
+    "pass": 345,
+    "fail": 0
+   },
+   "python": {
+    "exit": 0,
+    "pass": 9,
+    "fail": 0
+   }
+  },
+  "notes": "Only test file changed. Visible 24 includes candidate tests; hidden run replaces the file with merge version (9)."
+ },
+ {
+  "task": "csl89",
+  "arm": "B",
+  "applies": true,
+  "diff": {
+   "files": 1,
+   "added": 128,
+   "removed": 0,
+   "prod_changed": false,
+   "files_list": [
+    "scripts/tests/test_generate_catalog.py"
+   ],
+   "prod_changed_note": "prod_changed = any changed file outside tests/ dirs, *.test.*, test_* files (docs counted as non-test)"
+  },
+  "visible": {
+   "exit": 0,
+   "pass": 21,
+   "fail": 0
+  },
+  "hidden": {
+   "exit": 0,
+   "pass": 9,
+   "fail": 0
+  },
+  "full_suite": {
+   "node": {
+    "exit": 0,
+    "pass": 345,
+    "fail": 0
+   },
+   "python": {
+    "exit": 0,
+    "pass": 9,
+    "fail": 0
+   }
+  },
+  "notes": "Only test file changed. Visible 21 includes candidate tests; hidden run replaces the file with merge version (9)."
+ }
+]
