@@ -60,8 +60,12 @@ for (const v of readdirSync(join(here, 'verticals'))) {
         why: `${stale.length}/${allRepos.length} cited repos stale or archived`,
       });
     }
-    if (/\[flagged: instruction-like/.test(text)) {
-      proposals.push({ id, vertical: v, engine: 'human', gap: 'flagged', priority: 1, prompt: null, why: 'sanitiser flagged instruction-like text; review the original report before reuse' });
+    // Counted by the sanitiser over each whole report (dossier front matter), not by searching the
+    // dossier text. A dossier without the count predates the field: fail closed.
+    const injectionFlags = Number(text.match(/^injection_flags: (\d+)$/m)?.[1] ?? NaN);
+    if (injectionFlags !== 0) {
+      const why = Number.isNaN(injectionFlags) ? 'no injection_flags count; rebuild the dossier' : `${injectionFlags} sanitiser flag(s); review the original reports before reuse`;
+      proposals.push({ id, vertical: v, engine: 'human', gap: 'flagged', priority: 1, prompt: null, why });
     }
   }
 }

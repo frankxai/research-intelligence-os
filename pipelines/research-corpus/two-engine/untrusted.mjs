@@ -25,21 +25,24 @@ const INSTRUCTION_LIKE = [
 ];
 
 export function sanitize(text) {
-  let flagged = 0;
-  let s = text.replace(EOL, '\n').replace(INVISIBLE, () => { flagged += 1; return ''; });
+  let hidden = 0;
+  let instructions = 0;
+  let s = text.replace(EOL, '\n').replace(INVISIBLE, () => { hidden += 1; return ''; });
   // Remove comments until stable: nested or overlapping delimiters cannot leave a live comment.
   for (let prev = ''; prev !== s;) { prev = s; s = s.replace(HTML_COMMENT, ''); }
-  s = s.replace(UNCLOSED_COMMENT, () => { flagged += 1; return ''; });
+  s = s.replace(UNCLOSED_COMMENT, () => { hidden += 1; return ''; });
   const clean = s
     .split('\n')
     // Replace only the matching phrase: a whole-line drop once erased a report's entire citation
     // list, which Gemini emits as one long line.
     .map((line) => INSTRUCTION_LIKE.reduce((l, re) => l.replace(new RegExp(re.source, 'gi'), () => {
-      flagged += 1;
+      instructions += 1;
       return '[flagged: instruction-like text removed]';
     }), line))
     .join('\n');
-  return { text: clean, flagged };
+  // `flagged` gates human review (instruction-like phrases); `hidden` counts stripped invisible
+  // characters and unclosed comments, which are common in clean web text and only reported.
+  return { text: clean, flagged: instructions, hidden };
 }
 
 // Untrusted text embedded in a dossier must not add document structure (fake headings, setext

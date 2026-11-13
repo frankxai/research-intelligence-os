@@ -85,9 +85,12 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
   const consensusRepos = both ? [...g.repos].filter((r) => p.repos.has(r)) : [];
   const consensusPapers = both ? [...g.papers].filter((x) => p.papers.has(x)) : [];
   const only = (e, kind) => (both ? [...t.engines[e][kind]].filter((x) => !t.engines[e === 'gemini' ? 'perplexity' : 'gemini'][kind].has(x)) : [...(t.engines[e]?.[kind] || [])]);
+  // Counted from the sanitiser over each whole report, not from dossier text, so a flag in a part
+  // of a report that never reaches the dossier still raises a human-review gap downstream.
+  const flags = have.reduce((n, e) => n + t.engines[e].flagged, 0);
   const out = [
     '---', `id: ${t.id}`, `vertical: ${t.vertical}`, `engines: [${have.join(', ')}]`,
-    `built: ${new Date().toISOString()}`, 'verification: unverified-ai-synthesis; sources existence-checked', '---', '',
+    `built: ${new Date().toISOString()}`, 'verification: unverified-ai-synthesis; sources existence-checked', `injection_flags: ${flags}`, '---', '',
     `# ${t.id}: two-engine dossier`, '',
     `Engines: ${have.map((e) => `${e} (${t.engines[e].words} words)`).join(', ')}. Full reports live in the private corpus (\`research_search\` / \`research_read\`).`, '',
     '## Consensus sources (cited by both engines, existence-checked)', '',
@@ -100,7 +103,6 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
       ...only(e, 'repos').sort((a, b) => (reg.repos[b].stars || 0) - (reg.repos[a].stars || 0)).map(fmtRepo), '',
       ...only(e, 'papers').map(fmtPaper), '');
   }
-  const flags = have.reduce((n, e) => n + t.engines[e].flagged, 0);
   for (const [key] of SECTIONS) {
     out.push(`## ${LABEL[key]}`, '');
     for (const e of have) {
