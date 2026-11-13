@@ -52,7 +52,16 @@ console.log(`wrote ${written.length} perplexity-dr docs`);
 if (process.argv.includes('--migrate')) {
   const wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler';
   const manifest = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, 'utf8')) : {};
-  const old = Object.keys(manifest).filter((k) => /\/estate-reports-(kb|prior)-/.test(k));
+  // The estate-reports- prefix only says a file came from some reports/ directory, not from this lane.
+  // A key is retired only when this run wrote its perplexity-dr replacement for the same report id
+  // and the old file still exists in this lane's reports/ (same file name).
+  const replaced = new Set(written.map((k) => k.replace(/^.*\/perplexity-dr-/, '').replace(/\.md$/, '')));
+  const ours = new Set(readdirSync(join(here, 'reports')).map((f) => f.replace(/\.md$/, '')));
+  const old = Object.keys(manifest).filter((k) => {
+    const id = k.match(/\/estate-reports-((?:kb|prior)-[^/]+)\.md$/)?.[1];
+    return id && replaced.has(id) && ours.has(id);
+  });
+  if (!old.length) console.log('migrate: nothing to retire (no estate-reports key has a replacement written this run)');
   for (const key of old) {
     execFileSync(wrangler, ['r2', 'object', 'delete', `${BUCKET}/${key}`, '--remote'], { stdio: 'ignore', shell: process.platform === 'win32' });
     const target = join(HOME, 'pruned', key);

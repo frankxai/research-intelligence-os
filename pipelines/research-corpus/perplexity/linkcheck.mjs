@@ -1,7 +1,7 @@
 // Checks that every cited URL in full reports resolves. Writes verticals/LINKCHECK.json.
 // usage: node linkcheck.mjs [reportId...]
-import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { lookup as dnsLookup } from 'node:dns';
 import { isIP, BlockList } from 'node:net';
@@ -16,7 +16,7 @@ const CONCURRENCY = 8;
 const TIMEOUT_MS = 12000;
 
 const only = process.argv.slice(2);
-const files = readdirSync(reportsDir).filter((f) => f.startsWith('kb-') && f.endsWith('.md') && !f.includes('.chat.'))
+const files = readdirSync(reportsDir).filter((f) => f.endsWith('.md') && !f.includes('.chat.') && !f.includes('.artifact.'))
   .filter((f) => !only.length || only.some((id) => f.startsWith(id)));
 const prior = existsSync(outFile) ? JSON.parse(readFileSync(outFile, 'utf8')) : {};
 
@@ -51,7 +51,8 @@ const request = (url, method, signal) => new Promise((resolve, reject) => {
   if (isIP(host) && !isPublicIp(host)) return reject(Object.assign(new Error('not-public'), { code: 'ENOTPUBLIC' }));
   const lib = u.protocol === 'https:' ? https : http;
   const req = lib.request(u, { method, lookup: safeLookup, signal, headers: { 'user-agent': 'Mozilla/5.0 linkcheck' } }, (res) => {
-    res.resume();
+    // Only the status matters; destroying the response stops an endless GET body from holding the socket.
+    res.destroy();
     resolve({ status: res.statusCode, location: res.headers.location });
   });
   req.on('error', reject);
@@ -99,7 +100,8 @@ const pool = async (items, fn) => {
 
 for (const f of files) {
   const text = readFileSync(join(reportsDir, f), 'utf8');
-  const urls = [...new Set([...text.matchAll(/\]\((https?:\/\/[^)\s]+)\)/g)].map((m) => m[1]))];
+  // Allows one level of balanced parentheses inside the destination, e.g. Wikipedia's Foo_(bar).
+  const urls = [...new Set([...text.matchAll(/\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))+)\)/g)].map((m) => m[1]))];
   const statuses = await pool(urls, check);
   // 401/403/429 mean the page exists but blocks bots; only 404/410 and unreachable hosts count as dead.
   const dead = urls.filter((u, k) => [404, 410].includes(statuses[k]) || statuses[k] === 'error');
@@ -107,4 +109,5 @@ for (const f of files) {
   prior[f.replace(/\.md$/, '')] = { checked: new Date().toISOString(), urls: urls.length, dead: dead.length, unknown: unknown.length, deadUrls: dead };
   console.log(`${f}: ${urls.length} urls, ${dead.length} dead, ${unknown.length} blocked/unknown`);
 }
+mkdirSync(dirname(outFile), { recursive: true });
 writeFileSync(outFile, JSON.stringify(prior, null, 2));

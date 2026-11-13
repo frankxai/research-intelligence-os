@@ -48,8 +48,9 @@ for (const [vertical, rs] of Object.entries(byVertical)) {
       const s = pick(r.sections, re);
       if (s) lines.push(s.text.trim().replace(/^## /, '### '), '');
     }
-    for (const m of r.body.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+?)(?:[)/#?\s]|\.git|$)/g)) {
-      const repo = `${m[1]}/${m[2]}`.toLowerCase();
+    // Take the whole name segment, then drop only a trailing .git, so site.github.io stays intact.
+    for (const m of r.body.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)/g)) {
+      const repo = `${m[1]}/${m[2].replace(/\.git$/i, '').replace(/\.+$/, '')}`.toLowerCase();
       if (['orgs', 'topics', 'features', 'settings', 'search'].includes(m[1].toLowerCase())) continue;
       const e = oss.get(repo) || { repo, reports: new Set(), verticals: new Set() };
       e.reports.add(r.fm.id); e.verticals.add(vertical);
