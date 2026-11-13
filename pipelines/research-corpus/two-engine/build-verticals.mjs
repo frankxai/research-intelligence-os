@@ -9,7 +9,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { sanitize, UNTRUSTED_NOTE } from './untrusted.mjs';
+import { sanitize, inert, UNTRUSTED_NOTE } from './untrusted.mjs';
 
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research');
@@ -57,9 +57,12 @@ for (const engine of ENGINES) {
   if (!existsSync(dir)) continue;
   for (const f of readdirSync(dir).filter((x) => /^kb-\d+.*\.md$/.test(x) && !x.endsWith('.chat.md'))) {
     const id = f.replace(/\.md$/, '');
-    const { fm, body } = frontMatter(readFileSync(join(dir, f), 'utf8'));
+    const { fm, body: rawBody } = frontMatter(readFileSync(join(dir, f), 'utf8'));
+    // Sanitise the whole report before splitting it, so section boundaries are found in the same
+    // text that ends up in the dossier (no hidden characters or comments shifting a heading).
+    const { text: body, flagged } = sanitize(rawBody);
     const t = topics.get(id) || { id, vertical: fm.vertical || 'unsorted', engines: {} };
-    t.engines[engine] = { body, words: body.split(/\s+/).length, sections: sections(body), repos: repos(body), papers: papers(body) };
+    t.engines[engine] = { body, flagged, words: body.split(/\s+/).length, sections: sections(body), repos: repos(body), papers: papers(body) };
     topics.set(id, t);
   }
 }
@@ -97,14 +100,12 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
       ...only(e, 'repos').sort((a, b) => (reg.repos[b].stars || 0) - (reg.repos[a].stars || 0)).map(fmtRepo), '',
       ...only(e, 'papers').map(fmtPaper), '');
   }
-  let flags = 0;
+  const flags = have.reduce((n, e) => n + t.engines[e].flagged, 0);
   for (const [key] of SECTIONS) {
     out.push(`## ${LABEL[key]}`, '');
     for (const e of have) {
-      const raw = t.engines[e].sections[key];
-      const { text, flagged } = raw ? sanitize(raw) : { text: '_section not found in this report_', flagged: 0 };
-      flags += flagged;
-      out.push(`### ${e}`, '', UNTRUSTED_NOTE, '', text, '');
+      const text = t.engines[e].sections[key];
+      out.push(`### ${e}`, '', UNTRUSTED_NOTE, '', text ? inert(text) : '_section not found in this report_', '');
     }
   }
   const vdir = join(here, 'verticals', t.vertical);
