@@ -1,0 +1,22 @@
+{
+  "task": "csl105",
+  "arm": "B",
+  "trial": 1,
+  "model": "claude-sonnet-5-5",
+  "started_utc": "2026-11-13T21:47:02Z",
+  "finished_utc": "2026-11-13T21:50:37Z",
+  "tests_run": [
+    "python3 scripts/validate_skills.py -> OK, 122 skills compliant (13 pre-existing warnings), exit 0",
+    "python3 -m unittest discover -s scripts/tests -p 'test_*.py' -> 18 run, 18 pass, 0 fail (9 new)",
+    "node --test scripts/tests/absorb.test.mjs -> 14 run, 14 pass, 0 fail",
+    "node --test -> 387 run, 382 pass, 0 fail, 5 skipped",
+    "python3 scripts/check_links.py -> OK",
+    "python3 scripts/generate_catalog.py --check -> OK",
+    "python3 scripts/check_counts.py -> OK",
+    "node scripts/build-catalog.mjs --check -> OK",
+    "generate_site.py --check -> not run"
+  ],
+  "self_assessment": "done",
+  "subagents_used": 3,
+  "notes": "Planner, maker, independent verifier (PASS, no fix round needed). Validator now rejects name!=dir, leading/trailing hyphen, consecutive hyphens, compatibility>500. Added scripts/tests/test_validate_skills.py; updated CONTRIBUTING.md, spec/README.md, README.md; renamed absorb.test.mjs fixture name absorb-probe->probe to match its dir. Not changed: scripts/validate-skills.mjs (older separate validator); validate.yml not updated to run python tests. Known pre-existing gap: plain multi-line scalar continuation not joined by parse_frontmatter."
+}

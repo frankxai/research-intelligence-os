@@ -1,0 +1,254 @@
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index a39c7cc..3b53136 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -25,10 +25,12 @@ checklist — lives in [`spec/README.md`](spec/README.md). Start a new skill by
+ - Be named exactly `SKILL.md`, be valid UTF-8, and not be empty.
+ - Start with YAML frontmatter containing `name` and `description` (the two required fields). An
+   optional `version` is fine but not required.
+-- Use a `name` that is lowercase, hyphenated, ≤ 64 characters, and matches `^[a-z0-9][a-z0-9-]*$`
+-  (conventionally identical to the skill's folder name).
++- Use a `name` that is lowercase, hyphenated, ≤ 64 characters, matches
++  `^[a-z0-9]+(?:-[a-z0-9]+)*$` (no leading, trailing, or consecutive hyphens), and **equals the
++  skill's folder name**.
+ - Provide a specific, non-empty `description` (≤ 1024 chars) that tells the model **what the skill
+   does AND when** to use it, in the third person, with explicit trigger keywords.
++- If present, keep `compatibility` ≤ 500 characters.
+ 
+ ```yaml
+ ---
+diff --git a/README.md b/README.md
+index 5a78413..f56ae81 100644
+--- a/README.md
++++ b/README.md
+@@ -241,7 +241,7 @@ free-skills/<skill-name>/
+ 
+ ```yaml
+ ---
+-name: mcp-architecture          # lowercase, hyphenated, 64 chars or fewer
++name: mcp-architecture          # must equal folder name; lowercase, hyphenated, 64 chars or fewer
+ description: Design and implement MCP servers... Use when architecting an MCP server...
+ ---
+ ```
+diff --git a/scripts/tests/absorb.test.mjs b/scripts/tests/absorb.test.mjs
+index d39bfc8..2ed1d0f 100644
+--- a/scripts/tests/absorb.test.mjs
++++ b/scripts/tests/absorb.test.mjs
+@@ -38,7 +38,7 @@ Built on SIP.
+ /** Enough distinct prose to clear MIN_SHINGLES at the 5-word width. */
+ const LONG = Array.from({ length: 40 }, (_, i) => `step ${i} does a distinct thing worth writing down here`).join('\n');
+ 
+-function fixture({ staged = VALID('absorb-probe', LONG), existing = {} } = {}) {
++function fixture({ staged = VALID('probe', LONG), existing = {} } = {}) {
+   const repo = mkdtempSync(join(tmpdir(), 'absorb-'));
+   mkdirSync(join(repo, 'scripts'), { recursive: true });
+   for (const f of COPIED) copyFileSync(join(SCRIPTS, f), join(repo, 'scripts', f));
+@@ -124,7 +124,7 @@ test('gate 2 refuses a short SHA, a non-GitHub source, and a lazy change stateme
+ });
+ 
+ test('gate 3 refuses an artifact that is >=85% identical to an existing skill', () => {
+-  const dup = VALID('absorb-probe', LONG);
++  const dup = VALID('probe', LONG);
+   withRepo({ staged: dup, existing: { 'already-here': dup } }, (repo) => {
+     const { code, out } = absorb(repo);
+     assert.equal(code, 1, out);
+@@ -137,7 +137,7 @@ test('gate 3 refuses an artifact that is >=85% identical to an existing skill',
+ test('gate 3 refuses an artifact too short to compare, instead of passing it unchecked', () => {
+   // Regression: this returned "distinctness unchecked" and PASSED, so a near
+   // duplicate short enough to dodge the shingle floor could land unexamined.
+-  const tiny = '---\nname: absorb-probe\ndescription: Tiny.\n---\n\nUse it well.\n\nBuilt on SIP.\n';
++  const tiny = '---\nname: probe\ndescription: Tiny.\n---\n\nUse it well.\n\nBuilt on SIP.\n';
+   withRepo({ staged: tiny }, (repo) => {
+     const { code, out } = absorb(repo);
+     assert.equal(code, 1, `a 3-word skill was allowed through\n${out}`);
+@@ -159,7 +159,7 @@ test('gate 3 compares a short-but-real artifact on the narrow window and clears
+   // Regression: 18 five-word shingles fell under the old floor of 40, so this
+   // artifact was passed with "distinctness unchecked" — cleared without a
+   // comparison ever running. It must now be compared and shown distinct.
+-  withRepo({ staged: BAND('absorb-probe', 'unmistakably'), existing: { 'unrelated': VALID('unrelated', LONG) } }, (repo) => {
++  withRepo({ staged: BAND('probe', 'unmistakably'), existing: { 'unrelated': VALID('unrelated', LONG) } }, (repo) => {
+     const { code, out } = absorb(repo);
+     assert.equal(verdict(out, 3), 'pass', out);
+     assert.match(out, /compared on 3-word shingles/, `the narrow window did not run\n${out}`);
+@@ -170,7 +170,7 @@ test('gate 3 compares a short-but-real artifact on the narrow window and clears
+ });
+ 
+ test('gate 3 catches a duplicate that only the narrow window can see', () => {
+-  withRepo({ staged: BAND('absorb-probe', 'identical'), existing: { 'near-twin': BAND('near-twin', 'identical') } }, (repo) => {
++  withRepo({ staged: BAND('probe', 'identical'), existing: { 'near-twin': BAND('near-twin', 'identical') } }, (repo) => {
+     const { code, out } = absorb(repo);
+     assert.equal(verdict(out, 3), 'REFUSE', out);
+     assert.match(out, /identical to free-skills\/near-twin/, out);
+@@ -180,7 +180,7 @@ test('gate 3 catches a duplicate that only the narrow window can see', () => {
+ });
+ 
+ test('gate 4 refuses a missing attestation footer', () => {
+-  withRepo({ staged: VALID('absorb-probe', LONG).replace('Built on SIP.', '') }, (repo) => {
++  withRepo({ staged: VALID('probe', LONG).replace('Built on SIP.', '') }, (repo) => {
+     const { code, out } = absorb(repo);
+     assert.equal(code, 1, out);
+     assert.equal(verdict(out, 4), 'REFUSE', out);
+@@ -196,9 +196,9 @@ test('gate 4 refuses a malformed SKILL.md that carries the footer', () => {
+   const malformed = {
+     'no frontmatter': `# absorb probe\n\n${LONG}\n\nBuilt on SIP.\n`,
+     'missing name': `---\ndescription: No name key at all.\n---\n\n${LONG}\n\nBuilt on SIP.\n`,
+-    'missing description': `---\nname: absorb-probe\n---\n\n${LONG}\n\nBuilt on SIP.\n`,
++    'missing description': `---\nname: probe\n---\n\n${LONG}\n\nBuilt on SIP.\n`,
+     'name not kebab-case': `---\nname: Absorb_Probe\ndescription: Bad name.\n---\n\n${LONG}\n\nBuilt on SIP.\n`,
+-    'unterminated frontmatter': `---\nname: absorb-probe\ndescription: Never closed.\n\n${LONG}\n\nBuilt on SIP.\n`,
++    'unterminated frontmatter': `---\nname: probe\ndescription: Never closed.\n\n${LONG}\n\nBuilt on SIP.\n`,
+   };
+   for (const [label, staged] of Object.entries(malformed)) {
+     withRepo({ staged }, (repo) => {
+diff --git a/scripts/tests/test_validate_skills.py b/scripts/tests/test_validate_skills.py
+new file mode 100644
+index 0000000..57918c4
+--- /dev/null
++++ b/scripts/tests/test_validate_skills.py
+@@ -0,0 +1,67 @@
++import contextlib
++import io
++import os
++import sys
++import tempfile
++import unittest
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
++import validate_skills  # noqa: E402
++
++
++def run(root):
++    buf = io.StringIO()
++    with contextlib.redirect_stdout(buf):
++        rc = validate_skills.main([root])
++    return rc, buf.getvalue()
++
++
++class ValidateSkillsTests(unittest.TestCase):
++    def check(self, dirname, name, extra="", nested=None):
++        with tempfile.TemporaryDirectory() as tmp:
++            d = os.path.join(tmp, *(nested or []), dirname)
++            os.makedirs(d)
++            with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
++                f.write(f"---\nname: {name}\ndescription: Does a thing. Use when testing.\n{extra}---\n\nBody\n")
++            return run(os.path.realpath(tmp))
++
++    def test_valid(self):
++        self.assertEqual(self.check("foo-bar", "foo-bar")[0], 0)
++
++    def test_nested_one_level(self):
++        self.assertEqual(self.check("foo", "foo", nested=["group"])[0], 0)
++
++    def test_dir_mismatch(self):
++        rc, out = self.check("foo", "bar")
++        self.assertEqual(rc, 1)
++        self.assertIn("parent directory", out)
++
++    def test_trailing_hyphen(self):
++        rc, out = self.check("foo-", "foo-")
++        self.assertEqual(rc, 1)
++        self.assertIn("start or end with a hyphen", out)
++
++    def test_leading_hyphen(self):
++        rc, out = self.check("-foo", "-foo")
++        self.assertEqual(rc, 1)
++        self.assertIn("start or end with a hyphen", out)
++
++    def test_consecutive_hyphens(self):
++        rc, out = self.check("foo--bar", "foo--bar")
++        self.assertEqual(rc, 1)
++        self.assertIn("consecutive hyphens", out)
++
++    def test_compat_500_ok(self):
++        self.assertEqual(self.check("foo", "foo", "compatibility: " + "a" * 500 + "\n")[0], 0)
++
++    def test_compat_501_fails(self):
++        rc, out = self.check("foo", "foo", "compatibility: " + "a" * 501 + "\n")
++        self.assertEqual(rc, 1)
++        self.assertIn("compatibility", out)
++
++    def test_missing_compat_ok(self):
++        self.assertEqual(self.check("foo", "foo")[0], 0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/validate_skills.py b/scripts/validate_skills.py
+index e439435..414727e 100755
+--- a/scripts/validate_skills.py
++++ b/scripts/validate_skills.py
+@@ -4,8 +4,11 @@
+ Hard checks (a failure makes the script exit non-zero — wire it into CI):
+   * the file is valid UTF-8 and not empty
+   * YAML frontmatter is present and well-formed
+-  * `name` exists, is <= 64 chars, and matches ^[a-z0-9][a-z0-9-]*$
++  * `name` exists, is <= 64 chars, matches ^[a-z0-9]+(?:-[a-z0-9]+)*$ (no
++    leading, trailing, or consecutive hyphens), and equals its parent
++    directory name
+   * `description` exists, is non-empty, and is <= 1024 chars
++  * `compatibility`, if present, is <= 500 chars
+   * the skill file is named exactly `SKILL.md` (Claude Code requires the
+     uppercase name for discovery)
+ 
+@@ -36,7 +39,8 @@ import re  # noqa: E402
+ REPO = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+ DEFAULT_ROOTS = ("free-skills", "absorbed")
+ STAGING = "_staging"
+-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
++NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
++MAX_COMPAT = 500
+ RESERVED = ("anthropic", "claude")
+ MAX_BODY_LINES = 500
+ 
+@@ -100,13 +104,26 @@ def main(argv: list[str]) -> int:
+         name = fm.get("name", "")
+         if not name:
+             errors.append(f"{rel}: missing 'name'")
++        elif name.startswith("-") or name.endswith("-"):
++            errors.append(f"{rel}: 'name' must not start or end with a hyphen (got {name!r})")
++        elif "--" in name:
++            errors.append(f"{rel}: 'name' must not contain consecutive hyphens (got {name!r})")
+         elif not NAME_RE.match(name):
+-            errors.append(f"{rel}: 'name' must match ^[a-z0-9][a-z0-9-]*$ (got {name!r})")
++            errors.append(f"{rel}: 'name' must match ^[a-z0-9]+(?:-[a-z0-9]+)*$ (got {name!r})")
+         elif len(name) > 64:
+             errors.append(f"{rel}: 'name' exceeds 64 characters")
+         elif name in RESERVED:
+             warnings.append(f"{rel}: 'name' is a reserved word ({name!r})")
+ 
++        if name and fn == "SKILL.md":
++            dirname = os.path.basename(os.path.dirname(full))
++            if name != dirname:
++                errors.append(f"{rel}: 'name' ({name!r}) must match its parent directory ({dirname!r})")
++
++        compat = fm.get("compatibility", "")
++        if len(compat) > MAX_COMPAT:
++            errors.append(f"{rel}: 'compatibility' exceeds {MAX_COMPAT} characters ({len(compat)})")
++
+         desc = fm.get("description", "")
+         if not desc:
+             errors.append(f"{rel}: missing 'description'")
+diff --git a/spec/README.md b/spec/README.md
+index ddf628c..854bf71 100644
+--- a/spec/README.md
++++ b/spec/README.md
+@@ -31,8 +31,9 @@ description: What it does AND when to use it, with trigger keywords. Third perso
+ 
+ | Field | Rules |
+ |---|---|
+-| `name` | **Required.** Lowercase, hyphenated, ≤ 64 chars, matches `^[a-z0-9][a-z0-9-]*$`. Conventionally identical to the folder name. Prefer a clear, specific name (gerunds like `processing-pdfs` read well). Avoid `helper`/`utils`/`tools`. Do not use the reserved words `anthropic` or `claude` as the whole name. |
++| `name` | **Required.** Lowercase, hyphenated, ≤ 64 chars, matches `^[a-z0-9]+(?:-[a-z0-9]+)*$` (no leading, trailing, or consecutive hyphens). Must match the folder name. Prefer a clear, specific name (gerunds like `processing-pdfs` read well). Avoid `helper`/`utils`/`tools`. Do not use the reserved words `anthropic` or `claude` as the whole name. |
+ | `description` | **Required.** Non-empty, ≤ 1024 chars, no XML tags. The single most important line — it is the only text preloaded for routing. State **what the skill does and when to load it**, in the **third person**, with explicit **trigger keywords**. Claude tends to *undertrigger*, so be specific and a little "pushy". |
++| `compatibility` | Optional. ≤ 500 chars; environment requirements (tools, network, runtime). |
+ 
+ > This repo also tolerates an optional `version` field. It is not part of the minimal open
+ > standard but is harmless and useful for tracking.
+@@ -50,7 +51,7 @@ Skills load in three levels, so a large library costs almost nothing until a ski
+ ## Quality checklist (PR review rubric)
+ 
+ - [ ] Folder contains a `SKILL.md` (uppercase), valid UTF-8, non-empty.
+-- [ ] `name` is hyphen-case, ≤ 64 chars, matches the folder name.
++- [ ] `name` is hyphen-case (no leading/trailing/consecutive hyphens), ≤ 64 chars, matches the folder name; `compatibility` (if any) ≤ 500 chars.
+ - [ ] `description` is third-person and says **what + when + trigger keywords**.
+ - [ ] Body is focused on **one** workflow and stays under ~500 lines.
+ - [ ] Deep material lives in `references/`; deterministic steps in `scripts/` (with real error
