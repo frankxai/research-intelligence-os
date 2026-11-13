@@ -123,6 +123,16 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
       ...only(e, 'repos').sort((a, b) => (reg.repos[b].stars || 0) - (reg.repos[a].stars || 0)).map(fmtRepo), '',
       ...only(e, 'papers').map(fmtPaper), '');
   }
+  // Reports written to a custom prompt have none of the five standard sections. Without this digest
+  // the dossier reads as empty and editors conclude the corpus has no evidence on the topic.
+  for (const e of have.filter((x) => Object.keys(t.engines[x].sections).length === 0)) {
+    const body = t.engines[e].body;
+    const outline = body.split('\n').filter((l) => /^#{1,3} /.test(l)).slice(0, 40).join('\n');
+    const lead = body.replace(/^#[^\n]*\n/, '').split(/\n#{2} /)[0].split(/\s+/).slice(0, 450).join(' ');
+    out.push(`## Report digest (${e})`, '',
+      `This ${e} report does not use the five-section format, so the sections below are empty. It holds ${t.engines[e].words} words: read the full report before concluding the corpus lacks evidence.`, '',
+      UNTRUSTED_NOTE, '', '### Outline', '', inert(outline || '_no headings_'), '', '### Opening', '', inert(lead), '');
+  }
   for (const [key] of SECTIONS) {
     out.push(`## ${LABEL[key]}`, '');
     for (const e of have) {

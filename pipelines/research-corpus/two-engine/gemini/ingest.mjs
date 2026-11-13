@@ -25,17 +25,23 @@ const DOMAIN = {
   'kb-28': 'ai-for-science', 'kb-29': 'marketing', 'kb-36': 'ai-for-science', 'kb-37': 'business-strategy',
   'kb-38': 'ai-models-platforms', 'kb-39': 'ai-models-platforms',
 };
+const VERTICAL_DOMAIN = {
+  design: 'web-design', engineering: 'ai-models-platforms', growth: 'marketing', community: 'community',
+  'agent-infrastructure': 'ai-models-platforms', 'agentic-products': 'business-strategy',
+  science: 'ai-for-science', industry: 'business-strategy', investing: 'business-strategy',
+};
 
 const q = JSON.parse(readFileSync(join(here, 'queue.json'), 'utf8'));
 let n = 0;
-for (const f of readdirSync(join(here, 'reports')).filter((x) => x.endsWith('.md'))) {
+for (const f of readdirSync(join(here, 'reports')).filter((x) => x.endsWith('.md') && !x.endsWith('.chat.md'))) {
   const id = f.replace(/\.md$/, '');
-  const domain = DOMAIN[id.slice(0, 5)];
+  const item = q.items.find((x) => x.id === id) || {};
+  // Exact topic number first (kb-160 must not match kb-16), then the item's vertical.
+  const domain = DOMAIN[id.match(/^kb-\d+/)?.[0]] || VERTICAL_DOMAIN[item.vertical];
   if (!domain) { console.error(`no domain for ${id}`); continue; }
   const target = join(corpus, domain, `gemini-dr-${id}.md`);
   const rawBody = readFileSync(join(here, 'reports', f), 'utf8').replace(/^---[\s\S]*?\n---\n/, '');
   const body = sanitize(rawBody).text;
-  const item = q.items.find((x) => x.id === id) || {};
   const title = (body.match(/^#\s+(.+)$/m)?.[1] ?? id).trim();
   const fm = [
     '---',
