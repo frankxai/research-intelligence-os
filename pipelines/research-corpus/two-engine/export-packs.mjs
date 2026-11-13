@@ -13,7 +13,7 @@ const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'researc
 const out = join(here, 'packs');
 if (existsSync(out)) rmSync(out, { recursive: true });
 
-const verticals = readdirSync(join(here, 'verticals')).filter((v) => existsSync(join(here, 'verticals', v, 'SKILL.md')));
+const verticals = readdirSync(join(here, 'verticals')).filter((v) => existsSync(join(here, 'verticals', v, 'SKILL.md')) && existsSync(join(here, 'verticals', v, 'README.md')));
 const write = (p, text) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); };
 
 for (const v of verticals) {

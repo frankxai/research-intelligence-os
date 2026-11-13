@@ -75,7 +75,7 @@ for (const engine of ENGINES) {
     const recorded = (v) => (v === undefined ? 0 : /^\d+$/.test(v) ? Number(v) : 1);
     const flagged = s.flagged + recorded(fm.injection_flags);
     const hidden = s.hidden + (/^\d+$/.test(fm.hidden_chars ?? '') ? Number(fm.hidden_chars) : 0);
-    const t = topics.get(id) || { id, vertical: fm.vertical || 'unsorted', engines: {} };
+    const t = topics.get(id) || { id, vertical: /^[a-z0-9][a-z0-9-]{0,40}$/.test(fm.vertical || '') ? fm.vertical : 'unsorted', engines: {} };
     t.engines[engine] = { body, flagged, hidden, words: body.split(/\s+/).length, sections: sections(body), repos: repos(body), papers: papers(body) };
     topics.set(id, t);
   }
