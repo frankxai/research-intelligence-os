@@ -1,0 +1,152 @@
+diff --git a/scripts/tests/test_generate_catalog.py b/scripts/tests/test_generate_catalog.py
+new file mode 100644
+index 0000000..9f00a5a
+--- /dev/null
++++ b/scripts/tests/test_generate_catalog.py
+@@ -0,0 +1,146 @@
++#!/usr/bin/env python3
++"""Unit tests for the pure functions `categorize` and `render` in generate_catalog.py."""
++import os
++import re
++import sys
++import unittest
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++import generate_catalog as gc  # noqa: E402
++
++
++class TestCategorize(unittest.TestCase):
++    def test_known_names_map_to_expected_category(self):
++        cases = {
++            "agentic-orchestration": "AI Agents & Orchestration",
++            "swarm-advanced": "AI Agents & Orchestration",
++            "mcp-architecture": "AI Frameworks, MCP & SDKs",
++            "langgraph-basics": "AI Frameworks, MCP & SDKs",
++            "oci-services-expert": "Oracle & Cloud",
++            "si": "Oracle & Cloud",
++            "nextjs-expert": "Web, Frontend & Animation",
++            "github-code-review": "Engineering Workflow & GitHub",
++            "newsletter-writer": "Content, Writing & Brand",
++            "suno-ai-mastery": "Creative & Media Production",
++            "gym-training-expert": "Mind, Body & Philosophy",
++            "pdf": "Documents & Productivity",
++            "arcanea-meta": "Creative & Media Production",
++            "library-meta": "Meta & Library",
++        }
++        for name, expected in cases.items():
++            with self.subTest(name=name):
++                self.assertEqual(gc.categorize(name), expected)
++
++    def test_unmatched_name_is_other(self):
++        self.assertEqual(gc.categorize("totally-unrelated-thing"), "Other")
++        self.assertEqual(gc.categorize(""), "Other")
++
++    def test_first_match_wins(self):
++        # "pair-programming" is not in the agents regex, but "nextjs-agent-team"
++        # matches both agents (first) and web (nextjs, later).
++        self.assertEqual(gc.categorize("nextjs-agent-team"), "AI Agents & Orchestration")
++        # "oracle-adk" matches AI Frameworks before Oracle & Cloud.
++        self.assertEqual(gc.categorize("oracle-adk"), "AI Frameworks, MCP & SDKs")
++        # "mcp-builder" matches the MCP category before Documents.
++        self.assertEqual(gc.categorize("mcp-builder"), "AI Frameworks, MCP & SDKs")
++
++    def test_anchors_are_respected(self):
++        # ^pdf$ must not match a longer name.
++        self.assertEqual(gc.categorize("pdf-extra"), "Other")
++        self.assertEqual(gc.categorize("pdf"), "Documents & Productivity")
++        # ^si$ must not match arbitrary names containing "si".
++        self.assertEqual(gc.categorize("sis"), "Other")
++
++    def test_case_sensitive(self):
++        self.assertEqual(gc.categorize("PDF"), "Other")
++
++    def test_every_result_is_a_known_title(self):
++        titles = {c[0] for c in gc.CATEGORIES} | {"Other"}
++        for name in ["a", "mcp-x", "oracle-x", "brand-x", "zzz"]:
++            self.assertIn(gc.categorize(name), titles)
++
++
++class TestRender(unittest.TestCase):
++    def test_empty(self):
++        out = gc.render({})
++        self.assertIn("**0 skills**", out)
++        self.assertNotIn("\n## ", out)
++
++    def test_header_and_total(self):
++        out = gc.render({"pdf": ("free-skills/pdf/SKILL.md", "Handle PDFs")})
++        self.assertTrue(out.startswith("# 📚 Skills Catalog\n"))
++        self.assertIn("**1 skills**", out)
++        self.assertIn("This file is generated", out)
++
++    def test_row_format_and_link(self):
++        out = gc.render({"pdf": ("free-skills/pdf/SKILL.md", "Handle PDFs")})
++        self.assertIn("## Documents & Productivity\n", out)
++        self.assertIn("| [`pdf`](../free-skills/pdf/SKILL.md) | Handle PDFs |\n", out)
++
++    def test_singular_and_plural_counts(self):
++        out = gc.render({
++            "pdf": ("free-skills/pdf/SKILL.md", "a"),
++            "docx": ("free-skills/docx/SKILL.md", "b"),
++            "zzz": ("free-skills/zzz/SKILL.md", "c"),
++        })
++        self.assertIn("_2 skills_", out)
++        self.assertIn("_1 skill_\n", out)
++        self.assertNotIn("_1 skills_", out)
++
++    def test_empty_categories_omitted(self):
++        out = gc.render({"zzz": ("free-skills/zzz/SKILL.md", "c")})
++        self.assertIn("## Other\n", out)
++        self.assertNotIn("## Documents & Productivity", out)
++
++    def test_category_order_follows_categories_list_then_other(self):
++        out = gc.render({
++            "zzz": ("p/zzz/SKILL.md", "o"),
++            "pdf": ("p/pdf/SKILL.md", "d"),
++            "swarm-x": ("p/swarm-x/SKILL.md", "s"),
++        })
++        headings = re.findall(r"^## (.+)$", out, re.M)
++        self.assertEqual(headings, [
++            "AI Agents & Orchestration", "Documents & Productivity", "Other"])
++
++    def test_skills_sorted_by_name_within_category(self):
++        out = gc.render({
++            "pptx": ("p/pptx/SKILL.md", "x"),
++            "docx": ("p/docx/SKILL.md", "x"),
++            "xlsx": ("p/xlsx/SKILL.md", "x"),
++        })
++        self.assertLess(out.index("`docx`"), out.index("`pptx`"))
++        self.assertLess(out.index("`pptx`"), out.index("`xlsx`"))
++
++    def test_description_whitespace_collapsed_and_pipes_escaped(self):
++        out = gc.render({"zzz": ("p/zzz/SKILL.md", "line one\n  line   two | pipe")})
++        self.assertIn("| line one line two \\| pipe |\n", out)
++
++    def test_long_description_truncated(self):
++        out = gc.render({"zzz": ("p/zzz/SKILL.md", "word " * 100)})
++        row = [l for l in out.splitlines() if l.startswith("| [`zzz`]")][0]
++        desc = row.split(") | ", 1)[1].rstrip(" |")
++        self.assertTrue(desc.endswith("..."))
++        self.assertLessEqual(len(desc), 180)
++
++    def test_description_of_exactly_180_not_truncated(self):
++        d = "a" * 180
++        out = gc.render({"zzz": ("p/zzz/SKILL.md", d)})
++        self.assertIn(f"| {d} |", out)
++        self.assertNotIn("...", out)
++
++    def test_description_of_181_truncated_to_180(self):
++        out = gc.render({"zzz": ("p/zzz/SKILL.md", "a" * 181)})
++        self.assertIn("| " + "a" * 177 + "... |", out)
++
++    def test_deterministic_and_input_order_independent(self):
++        a = {"pdf": ("p/pdf/SKILL.md", "d"), "zzz": ("p/zzz/SKILL.md", "z")}
++        b = dict(reversed(list(a.items())))
++        self.assertEqual(gc.render(a), gc.render(b))
++
++    def test_ends_with_newline(self):
++        out = gc.render({"pdf": ("p/pdf/SKILL.md", "d")})
++        self.assertTrue(out.endswith("\n"))
++
++
++if __name__ == "__main__":
++    unittest.main()
