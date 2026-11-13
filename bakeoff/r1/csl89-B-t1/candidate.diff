@@ -1,0 +1,134 @@
+diff --git a/scripts/tests/test_generate_catalog.py b/scripts/tests/test_generate_catalog.py
+new file mode 100644
+index 0000000..268b560
+--- /dev/null
++++ b/scripts/tests/test_generate_catalog.py
+@@ -0,0 +1,128 @@
++#!/usr/bin/env python3
++"""Unit tests for the pure functions in scripts/generate_catalog.py."""
++import os
++import re
++import sys
++import unittest
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++import generate_catalog as gc  # noqa: E402
++
++
++class CategorizeTests(unittest.TestCase):
++    def test_known_names(self):
++        cases = {
++            "swarm-advanced": "AI Agents & Orchestration",
++            "nextjs-agent-team": "AI Agents & Orchestration",
++            "mcp-builder": "AI Frameworks, MCP & SDKs",
++            "oracle-adk": "AI Frameworks, MCP & SDKs",
++            "oracle-database-expert": "Oracle & Cloud",
++            "si": "Oracle & Cloud",
++            "nextjs-expert": "Web, Frontend & Animation",
++            "github-code-review": "Engineering Workflow & GitHub",
++            "frankx-brand": "Content, Writing & Brand",
++            "brand-guidelines": "Content, Writing & Brand",
++            "skill-creator": "Content, Writing & Brand",
++            "acos-meta": "Creative & Media Production",
++            "gym-training-expert": "Mind, Body & Philosophy",
++            "pdf": "Documents & Productivity",
++            "contribute-catalog": "Meta & Library",
++            "my-meta": "Meta & Library",
++        }
++        for name, expected in cases.items():
++            with self.subTest(name=name):
++                self.assertEqual(gc.categorize(name), expected)
++
++    def test_other_fallback(self):
++        for name in ("pdf-viewer", "SWARM", "", "zzz-unknown"):
++            with self.subTest(name=name):
++                self.assertEqual(gc.categorize(name), "Other")
++
++    def test_search_is_unanchored(self):
++        self.assertEqual(gc.categorize("xnextjsx"), "Web, Frontend & Animation")
++
++    def test_invariants(self):
++        titles = [t for t, _ in gc.CATEGORIES]
++        self.assertEqual(len(titles), len(set(titles)))
++        self.assertNotIn("Other", titles)
++        for _, rx in gc.CATEGORIES:
++            re.compile(rx)
++        for name in ("swarm-advanced", "pdf", "nope", "", "si"):
++            self.assertIn(gc.categorize(name), titles + ["Other"])
++
++
++class RenderTests(unittest.TestCase):
++    def test_empty(self):
++        out = gc.render({})
++        self.assertTrue(out.startswith("# 📚 Skills Catalog\n"))
++        self.assertIn("**0 skills**", out)
++        self.assertIn("This file is generated", out)
++        self.assertNotIn("## ", out)
++
++    def test_total_count(self):
++        out = gc.render({"pdf": ("free-skills/pdf/SKILL.md", "a"),
++                         "zzz": ("free-skills/zzz/SKILL.md", "b")})
++        self.assertIn("**2 skills**", out)
++
++    def test_single_skill_golden_row_and_table(self):
++        out = gc.render({"pdf": ("free-skills/pdf/SKILL.md", "d")})
++        self.assertIn("\n## Documents & Productivity\n", out)
++        self.assertIn("_1 skill_\n", out)
++        self.assertNotIn("_1 skills_", out)
++        self.assertIn("| Skill | Description |\n|---|---|\n", out)
++        self.assertIn("| [`pdf`](../free-skills/pdf/SKILL.md) | d |\n", out)
++        self.assertTrue(out.endswith("| [`pdf`](../free-skills/pdf/SKILL.md) | d |\n"))
++
++    def test_plural_and_only_nonempty_sections(self):
++        out = gc.render({"swarm-a": ("a", "x"), "swarm-b": ("b", "y")})
++        self.assertIn("_2 skills_", out)
++        self.assertEqual(out.count("\n## "), 1)
++        self.assertIn("## AI Agents & Orchestration", out)
++        self.assertNotIn("## Other", out)
++
++    def test_section_order_other_last(self):
++        out = gc.render({
++            "zzz-unknown": ("z", ""),
++            "my-meta": ("m", ""),
++            "swarm-advanced": ("s", ""),
++        })
++        i_agents = out.index("## AI Agents & Orchestration")
++        i_meta = out.index("## Meta & Library")
++        i_other = out.index("## Other")
++        self.assertLess(i_agents, i_meta)
++        self.assertLess(i_meta, i_other)
++
++    def test_rows_sorted_within_category(self):
++        out = gc.render({"swarm-b": ("b", ""), "swarm-a": ("a", "")})
++        self.assertLess(out.index("`swarm-a`"), out.index("`swarm-b`"))
++
++    def _row(self, desc):
++        out = gc.render({"pdf": ("p", desc)})
++        return out.splitlines()[-1]
++
++    def test_whitespace_collapsed(self):
++        self.assertEqual(self._row("a  b\n c\t\td"), "| [`pdf`](../p) | a b c d |")
++
++    def test_pipe_escaped(self):
++        self.assertEqual(self._row("a|b"), "| [`pdf`](../p) | a\\|b |")
++
++    def test_length_180_untouched(self):
++        d = "a" * 180
++        self.assertEqual(self._row(d), f"| [`pdf`](../p) | {d} |")
++
++    def test_length_over_180_truncated(self):
++        row = self._row("a" * 181)
++        self.assertEqual(row, f"| [`pdf`](../p) | {'a' * 177}... |")
++
++    def test_truncation_rstrips_before_ellipsis(self):
++        d = "a" * 176 + " " + "b" * 10  # char 177 (index 176) is a space
++        row = self._row(d)
++        self.assertEqual(row, f"| [`pdf`](../p) | {'a' * 176}... |")
++
++    def test_empty_description(self):
++        out = gc.render({"pdf": ("p", "")})
++        self.assertTrue(out.endswith("| [`pdf`](../p) |  |\n"))
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,17 @@
+{
+  "task": "csl89",
+  "arm": "B",
+  "trial": 1,
+  "model": "claude-sonnet-5-5",
+  "started_utc": "2026-11-13T21:46:52Z",
+  "finished_utc": "2026-11-13T21:48:52Z",
+  "tests_run": [
+    {"command": "python3 -B -m unittest discover scripts/tests (in /tmp/work)", "passed": 21, "failed": 0, "note": "16 new + 5 existing test_skillmeta"},
+    {"command": "python3 -B -m unittest discover tests (in /tmp/work/scripts)", "passed": 21, "failed": 0},
+    {"command": "node --test (verifier)", "passed": 345, "failed": 0, "note": "350 total; 5 not pass/fail, not investigated"},
+    {"command": "python3 scripts/validate_skills.py; python3 scripts/generate_catalog.py --check; python3 scripts/check_links.py (verifier)", "passed": 3, "failed": 0}
+  ],
+  "self_assessment": "done",
+  "subagents_used": 3,
+  "notes": "Planner, maker, verifier. Verifier returned PASS; no fix round needed. Maker corrected one wrong planner assertion (empty description renders with two spaces). Production code untouched; one new file scripts/tests/test_generate_catalog.py (CategorizeTests 4, RenderTests 12)."
+}
