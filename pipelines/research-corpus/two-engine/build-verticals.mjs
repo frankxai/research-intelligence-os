@@ -60,9 +60,9 @@ for (const engine of ENGINES) {
     const { fm, body: rawBody } = frontMatter(readFileSync(join(dir, f), 'utf8'));
     // Sanitise the whole report before splitting it, so section boundaries are found in the same
     // text that ends up in the dossier (no hidden characters or comments shifting a heading).
-    const { text: body, flagged } = sanitize(rawBody);
+    const { text: body, flagged, hidden } = sanitize(rawBody);
     const t = topics.get(id) || { id, vertical: fm.vertical || 'unsorted', engines: {} };
-    t.engines[engine] = { body, flagged, words: body.split(/\s+/).length, sections: sections(body), repos: repos(body), papers: papers(body) };
+    t.engines[engine] = { body, flagged, hidden, words: body.split(/\s+/).length, sections: sections(body), repos: repos(body), papers: papers(body) };
     topics.set(id, t);
   }
 }
@@ -88,9 +88,10 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
   // Counted from the sanitiser over each whole report, not from dossier text, so a flag in a part
   // of a report that never reaches the dossier still raises a human-review gap downstream.
   const flags = have.reduce((n, e) => n + t.engines[e].flagged, 0);
+  const hiddenChars = have.reduce((n, e) => n + t.engines[e].hidden, 0);
   const out = [
     '---', `id: ${t.id}`, `vertical: ${t.vertical}`, `engines: [${have.join(', ')}]`,
-    `built: ${new Date().toISOString()}`, 'verification: unverified-ai-synthesis; sources existence-checked', `injection_flags: ${flags}`, '---', '',
+    `built: ${new Date().toISOString()}`, 'verification: unverified-ai-synthesis; sources existence-checked', `injection_flags: ${flags}`, `hidden_chars: ${hiddenChars}`, '---', '',
     `# ${t.id}: two-engine dossier`, '',
     `Engines: ${have.map((e) => `${e} (${t.engines[e].words} words)`).join(', ')}. Full reports live in the private corpus (\`research_search\` / \`research_read\`).`, '',
     '## Consensus sources (cited by both engines, existence-checked)', '',

@@ -25,7 +25,7 @@ let text = JSON.parse(`"${raw.slice(start + 22, end).replace(/^\\n/, '').replace
 // BrowserOS's per-read nonce markers are replaced by a durable `trust:` field in the front matter;
 // the text itself is sanitised (hidden characters, HTML comments, instruction-like lines flagged).
 text = text.replace(/^\[UNTRUSTED_PAGE_CONTENT[^\n]*\n/, '').replace(/\n?\[END_UNTRUSTED_PAGE_CONTENT[^\]]*\]\s*$/, '').trim();
-const { text: cleaned, flagged } = sanitize(text);
+const { text: cleaned, flagged, hidden } = sanitize(text);
 text = cleaned;
 
 const words = text.split(/\s+/).length;
@@ -46,6 +46,7 @@ const fm = [
   'review_state: unverified',
   'trust: untrusted-web-derived',
   `injection_flags: ${flagged}`,
+  `hidden_chars: ${hidden}`,
   '---',
   '',
 ].join('\n');

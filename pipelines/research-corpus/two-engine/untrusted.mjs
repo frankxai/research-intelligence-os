@@ -24,13 +24,23 @@ const INSTRUCTION_LIKE = [
   /\b(send|post|exfiltrate|upload) (your |the )?(secrets?|tokens?|api keys?|credentials|env)\b/i,
 ];
 
+// Strong hiding signals have no ordinary use in a research report: tag-block characters (invisible
+// ASCII), bidi overrides (U+202D/202E) and isolates (the Trojan Source set). They gate review like an
+// instruction phrase does. Bidi embeddings (U+202A-202C) are excluded: Google Scholar page titles
+// wrap author names in them, so they appear in clean reports (measured: 20 in 4 Gemini reports).
+const STRONG_HIDDEN = /[\u{E0000}-\u{E007F}\u{202D}\u{202E}\u{2066}-\u{2069}]/u;
+
 export function sanitize(text) {
   let hidden = 0;
+  let strong = 0;
   let instructions = 0;
-  let s = text.replace(EOL, '\n').replace(INVISIBLE, () => { hidden += 1; return ''; });
+  let s = text.replace(EOL, '\n').replace(INVISIBLE, (ch) => {
+    if (STRONG_HIDDEN.test(ch)) strong += 1; else hidden += 1;
+    return '';
+  });
   // Remove comments until stable: nested or overlapping delimiters cannot leave a live comment.
   for (let prev = ''; prev !== s;) { prev = s; s = s.replace(HTML_COMMENT, ''); }
-  s = s.replace(UNCLOSED_COMMENT, () => { hidden += 1; return ''; });
+  s = s.replace(UNCLOSED_COMMENT, () => { strong += 1; return ''; });
   const clean = s
     .split('\n')
     // Replace only the matching phrase: a whole-line drop once erased a report's entire citation
@@ -40,9 +50,10 @@ export function sanitize(text) {
       return '[flagged: instruction-like text removed]';
     }), line))
     .join('\n');
-  // `flagged` gates human review (instruction-like phrases); `hidden` counts stripped invisible
-  // characters and unclosed comments, which are common in clean web text and only reported.
-  return { text: clean, flagged: instructions, hidden };
+  // `flagged` gates human review: instruction-like phrases plus strong hiding signals (tag-block or
+  // bidi characters, an unclosed comment). `hidden` counts the remaining stripped format characters
+  // (zero-width, soft hyphen...), common in clean web text; callers record it but it does not gate.
+  return { text: clean, flagged: instructions + strong, hidden };
 }
 
 // Untrusted text embedded in a dossier must not add document structure (fake headings, setext
