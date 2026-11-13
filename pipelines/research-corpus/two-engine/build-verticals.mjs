@@ -25,7 +25,9 @@ const SECTIONS = [
 ];
 const LABEL = { oss: 'Top OSS projects', papers: 'Key papers', models: 'Mental models and frameworks', stack: 'Stack recommendation', open: 'Open questions' };
 
-function frontMatter(text) {
+function frontMatter(raw) {
+  // Normalise CRLF first: a Windows-saved report would otherwise lose its front matter and vertical.
+  const text = raw.replace(/\r\n?/g, '\n');
   const m = text.match(/^---\n([\s\S]*?)\n---\n/);
   const fm = {};
   if (m) for (const line of m[1].split('\n')) { const i = line.indexOf(':'); if (i > 0) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim(); }
@@ -105,7 +107,10 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
   const [g, p] = [t.engines.gemini, t.engines.perplexity];
   const both = g && p;
   const consensusRepos = both ? [...g.repos].filter((r) => p.repos.has(r)) : [];
-  const consensusPapers = both ? [...g.papers].filter((x) => p.papers.has(x)) : [];
+  // Only verified papers count as existence-checked consensus; shared but unverified ids are listed apart.
+  const sharedPapers = both ? [...g.papers].filter((x) => p.papers.has(x)) : [];
+  const consensusPapers = sharedPapers.filter((x) => reg.papers[x]?.status === 'exists');
+  const unverifiedShared = sharedPapers.filter((x) => reg.papers[x]?.status !== 'exists');
   const only = (e, kind) => (both ? [...t.engines[e][kind]].filter((x) => !t.engines[e === 'gemini' ? 'perplexity' : 'gemini'][kind].has(x)) : [...(t.engines[e]?.[kind] || [])]);
   // Counted from the sanitiser over each whole report, not from dossier text, so a flag in a part
   // of a report that never reaches the dossier still raises a human-review gap downstream.
@@ -120,6 +125,7 @@ for (const t of [...topics.values()].sort((a, b) => a.id.localeCompare(b.id))) {
     both ? '| Repo | Stars | Last push | | License |\n|---|---|---|---|---|' : '_Only one engine has reported on this topic so far._',
     ...consensusRepos.sort((a, b) => (reg.repos[b].stars || 0) - (reg.repos[a].stars || 0)).map(fmtRepo), '',
     ...(consensusPapers.length ? ['Papers cited by both:', '', ...consensusPapers.map(fmtPaper), ''] : []),
+    ...(unverifiedShared.length ? ['Cited by both but not verified (not found or unchecked; not consensus):', '', ...unverifiedShared.map(fmtPaper), ''] : []),
   ];
   for (const e of have) {
     out.push(`## Sources only ${e} cites`, '', '| Repo | Stars | Last push | | License |', '|---|---|---|---|---|',
