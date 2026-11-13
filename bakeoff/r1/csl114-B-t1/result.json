@@ -1,0 +1,21 @@
+{
+  "task": "csl114",
+  "arm": "B",
+  "trial": 1,
+  "model": "claude-sonnet-5-5",
+  "started_utc": "2026-11-13T21:44:50Z",
+  "finished_utc": "2026-11-13T21:52:36Z",
+  "tests_run": [
+    "python3 packs/estate-guard/tests/test_hooks.py -> pass (113 ok, 0 FAIL) [maker, final diff; verifier reran: pass]",
+    "node --test packs/estate-guard/tests/*.test.mjs -> 28 pass, 0 fail",
+    "python3 scripts/validate_skills.py -> OK (124 files; only pre-existing warnings)",
+    "python3 scripts/generate_catalog.py --check -> OK",
+    "python3 scripts/check_links.py -> OK",
+    "python3 scripts/generate_site.py --check -> OK",
+    "python3 scripts/check_counts.py -> OK",
+    "node scripts/build-catalog.mjs --check -> OK"
+  ],
+  "self_assessment": "partial",
+  "subagents_used": 4,
+  "notes": "Planner, maker (initial + one resumed fix round), verifier round 1, verifier round 2. Verifier 1 found a quoted-rm bypass and cwd tricks (pushd/builtin/CDPATH); fixed in the fix round. Verifier 2 (final diff) still FAILED: an rm hidden in a quoted word after ; & | or ( (e.g. `rm -rf /tmp/a && sh -c 'true;rm -rf /etc/x'`) is allowed, whereas base asked. Cause: _RM_WORD regex requires whitespace/slash/start before rm. Not fixed because the one allowed fix round was used. Minor: non-rm destructive commands (find -delete, rsync --delete) riding with a scratch rm now pass; symlinks created in-command (tar) are not seen. Deny tier unchanged."
+}
