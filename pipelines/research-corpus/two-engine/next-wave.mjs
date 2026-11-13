@@ -70,5 +70,26 @@ for (const v of readdirSync(join(here, 'verticals'))) {
   }
 }
 proposals.sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
+
+// --apply closes the loop: proposals with a prompt become queued items in each engine's queue
+// (missing-engine to the engine that lacks the topic; reconcile/freshness to Gemini, whose
+// harvester is in this lane). Existing ids are left untouched, so re-running is idempotent.
+// Human-review gaps are never enqueued.
+if (process.argv.includes('--apply')) {
+  const added = { gemini: 0, perplexity: 0 };
+  // Only the Gemini queue: it is this lane's. Other engines' queues belong to their own sessions,
+  // which read next-wave.json and enqueue for themselves.
+  for (const p of proposals.filter((x) => x.prompt && x.engine !== 'human' && x.engine !== 'perplexity')) {
+    const engine = 'gemini';
+    const qPath = join(here, engine, 'queue.json');
+    if (!existsSync(qPath)) continue;
+    const q = JSON.parse(readFileSync(qPath, 'utf8'));
+    if (q.items.some((i) => i.id === p.id)) continue;
+    q.items.push({ id: p.id, vertical: p.vertical, prompt: p.prompt, status: 'queued', origin: `next-wave ${p.gap}` });
+    writeFileSync(qPath, JSON.stringify(q, null, 1));
+    added[engine] += 1;
+  }
+  console.log(`enqueued: ${JSON.stringify(added)}`);
+}
 writeFileSync(join(here, 'next-wave.json'), JSON.stringify({ generated: new Date().toISOString(), proposals }, null, 1));
 console.table(proposals.map(({ id, engine, gap, why }) => ({ id, engine, gap, why })));

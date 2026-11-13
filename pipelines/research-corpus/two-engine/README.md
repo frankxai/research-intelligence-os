@@ -32,7 +32,8 @@ Agreement between independent engines plus a passing existence check is the conf
 | `node verify-sources.mjs` | existence check; throttled lookups stay `unchecked`, never `not-found` |
 | `node build-verticals.mjs` | two-engine dossiers and vertical indexes |
 | `node gen-vertical-skills.mjs` | one expert `SKILL.md` per vertical |
-| `node next-wave.mjs` | refinement: proposes the next wave per engine from the gaps (missing engine, < 5 consensus repos, > 20% stale sources, sanitiser flags) into `next-wave.json`; submits nothing |
+| `node next-wave.mjs [--apply]` | refinement: proposes the next wave per engine from the gaps (missing engine, < 5 consensus repos, > 20% stale sources, sanitiser flags) into `next-wave.json`; `--apply` enqueues the Gemini proposals (other engines' sessions enqueue their own) |
+| `node export-packs.mjs` | packages every vertical `SKILL.md` for Claude Code (`SKILL.md` folders), Vercel eve (`agent/skills/*.md`) and Google Antigravity (plugin layout with `mcp_config.json` for the corpus MCP) into `packs/`; installs nothing |
 
 All report text passes through `untrusted.mjs` (invisible and format characters, HTML comments, line-break normalisation, instruction-like phrases replaced in place) and is quoted inside dossiers; generated skills carry a trust-boundary rule.
 
