@@ -28,7 +28,7 @@ const DOMAIN = {
 
 const q = JSON.parse(readFileSync(join(here, 'queue.json'), 'utf8'));
 let n = 0;
-for (const f of readdirSync(join(here, 'reports')).filter((x) => x.endsWith('.md'))) {
+for (const f of readdirSync(join(here, 'reports')).filter((x) => x.endsWith('.md') && !x.endsWith('.chat.md'))) {
   const id = f.replace(/\.md$/, '');
   const domain = DOMAIN[id.slice(0, 5)];
   if (!domain) { console.error(`no domain for ${id}`); continue; }
