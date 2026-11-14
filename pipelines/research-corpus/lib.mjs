@@ -97,9 +97,13 @@ export function frontMatter(entry, exportedAt) {
 // they were read from, so an agent can tell a reviewed file from a working-tree draft.
 // The key carries the source repository and the path inside it, so two README.md files from
 // different repos (or different folders) can no longer overwrite each other.
-export function importKey({ domain, sourcePath, repoRoot }) {
+// With `engine` (a Deep Research report imported from a local folder), the key is scoped by the
+// engine instead: two engines that both keep reports in a folder named `reports` would otherwise
+// write the same `estate-reports-<file>` key and overwrite each other.
+export function importKey({ domain, sourcePath, repoRoot, engine }) {
   const norm = (p) => p.split('\\').join('/');
   const file = norm(sourcePath);
+  if (engine) return `${domain}/${slugify(engine)}-dr-${slugify(file.split('/').pop().replace(/\.md$/i, ''))}.md`;
   const root = repoRoot ? norm(repoRoot).replace(/\/$/, '') : file.split('/').slice(0, -1).join('/');
   const repo = root.split('/').pop();
   const rel = file.startsWith(`${root}/`) ? file.slice(root.length + 1) : file.split('/').pop();
@@ -117,7 +121,8 @@ export function localFrontMatter({ title, sourcePath, commit, domain, kind, modi
     `domain: ${domain}`,
     `modified: ${modified}`,
     `imported: ${importedAt}`,
-    `verification: ${commit ? 'committed-estate-document' : 'working-tree-draft'}`,
+    // A Deep Research report is AI synthesis whether or not the file is committed somewhere.
+    `verification: ${kind === 'deep-research' ? 'unverified-ai-synthesis' : commit ? 'committed-estate-document' : 'working-tree-draft'}`,
     '---',
     '',
   ].join('\n');
