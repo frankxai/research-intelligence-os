@@ -46,7 +46,8 @@ for (const d of dirs) {
 const REFRESH_DAYS = Number(process.env.SOURCES_REFRESH_DAYS || 14);
 const stale = (e) => !e || (['exists', 'not-found'].includes(e.status) && (Date.now() - Date.parse(e.checked || 0)) / 86400000 > REFRESH_DAYS);
 const allRepos = [...new Set(reports.flatMap((r) => r.repos))].filter((r) => stale(reg.repos[r]));
-const allPapers = [...new Set(reports.flatMap((r) => r.papers))].filter((p) => !reg.papers[p]);
+// A not-found paper is retried each run: Semantic Scholar lags arXiv, so a miss is not a verdict.
+const allPapers = [...new Set(reports.flatMap((r) => r.papers))].filter((p) => stale(reg.papers[p]) || reg.papers[p]?.status === 'not-found');
 console.log(`reports=${reports.length} new repos=${allRepos.length} new papers=${allPapers.length}`);
 
 for (let i = 0; i < allRepos.length; i += 40) {
@@ -91,10 +92,11 @@ async function lookupPapers(batch) {
   }
   return null;
 }
+let lookupFailed = 0;
 for (let i = 0; i < allPapers.length; i += 100) {
   const batch = allPapers.slice(i, i + 100);
   const rows = await lookupPapers(batch);
-  if (!rows) { console.error(`papers ${i}-${i + batch.length}: lookup throttled, left unchecked`); continue; }
+  if (!rows) { console.error(`papers ${i}-${i + batch.length}: lookup throttled, left unchecked`); lookupFailed += batch.length; continue; }
   batch.forEach((p, k) => {
     const v = rows[k];
     reg.papers[p] = v
@@ -110,9 +112,12 @@ const summary = reports.map((r) => {
   const ps = r.papers.map((x) => reg.papers[x]?.status);
   return {
     engine: r.engine, file: r.file,
-    repos: r.repos.length, repos_missing: rs.filter((s) => s === 'not-found').length,
-    papers: r.papers.length, papers_missing: ps.filter((s) => s === 'not-found').length,
+    repos: r.repos.length, repos_missing: rs.filter((s) => s === 'not-found').length, repos_unchecked: rs.filter((s) => !s).length,
+    papers: r.papers.length, papers_missing: ps.filter((s) => s === 'not-found').length, papers_unchecked: ps.filter((s) => !s).length,
   };
 });
 writeFileSync(join(here, 'sources-summary.json'), JSON.stringify(summary, null, 1));
 console.table(summary);
+// A run that could not check what it was asked to check must not look like a pass.
+const unchecked = summary.reduce((n, r) => n + r.repos_unchecked + r.papers_unchecked, 0);
+if (lookupFailed > 0 || unchecked > 0) { console.error(`verification incomplete: ${unchecked} sources unchecked, ${lookupFailed} paper lookups failed`); process.exitCode = 1; }

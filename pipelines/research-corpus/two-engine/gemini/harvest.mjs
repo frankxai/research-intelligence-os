@@ -10,6 +10,8 @@ import { sanitize } from '../untrusted.mjs';
 
 const [, , file, id] = process.argv;
 if (!file || !id) { console.error('usage: harvest.mjs <file> <id>'); process.exit(2); }
+// The id names an output file; a slug keeps `..` and path separators out of the write path.
+if (!/^[a-z0-9][a-z0-9-]{0,60}$/.test(id)) { console.error(`invalid id ${JSON.stringify(id)}: expected a lowercase slug`); process.exit(2); }
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = join(process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research'), 'gemini');
 const q = JSON.parse(readFileSync(join(here, 'queue.json'), 'utf8'));

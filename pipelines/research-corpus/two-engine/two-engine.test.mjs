@@ -307,3 +307,17 @@ test('ingest writes corpus/<domain>/gemini-dr-<id>.md marked unverified and skip
   const again = run(h, 'gemini/ingest.mjs');
   assert.match(again.stdout, /0 new or changed/);
 });
+
+test('harvest rejects an id that could escape the reports directory', () => {
+  const home = mkdtempSync(join(tmpdir(), 'harvest-id-'));
+  try {
+    mkdirSync(join(home, 'gemini'), { recursive: true });
+    writeFileSync(join(home, 'gemini', 'queue.json'), JSON.stringify({ items: [{ id: '../../escape', vertical: 'x', chat: 'c' }] }));
+    const f = join(home, 'run.txt');
+    writeFileSync(f, '=====REPORT-START=====\nbody\n=====REPORT-END=====');
+    const r = spawnSync(process.execPath, [join(dir, 'gemini', 'harvest.mjs'), f, '../../escape'], { env: { ...process.env, RESEARCH_HOME: home }, encoding: 'utf8' });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /invalid id/);
+    assert.equal(existsSync(join(home, 'escape.md')), false);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
