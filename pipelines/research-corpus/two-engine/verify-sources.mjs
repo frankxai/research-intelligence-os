@@ -50,6 +50,7 @@ const allRepos = [...new Set(reports.flatMap((r) => r.repos))].filter((r) => sta
 const allPapers = [...new Set(reports.flatMap((r) => r.papers))].filter((p) => stale(reg.papers[p]) || reg.papers[p]?.status === 'not-found');
 console.log(`reports=${reports.length} new repos=${allRepos.length} new papers=${allPapers.length}`);
 
+let lookupFailed = 0;
 for (let i = 0; i < allRepos.length; i += 40) {
   const batch = allRepos.slice(i, i + 40);
   const body = batch.map((r, k) => {
@@ -61,7 +62,7 @@ for (let i = 0; i < allRepos.length; i += 40) {
     res = JSON.parse(execFileSync('gh', ['api', 'graphql', '-f', `query=query { ${body} }`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   } catch (e) {
     // GraphQL returns partial data plus errors for missing repos; gh exits non-zero but prints JSON.
-    try { res = JSON.parse(e.stdout?.toString() || ''); } catch { console.error(`batch ${i} failed: ${String(e.stderr || e).slice(0, 200)}`); continue; }
+    try { res = JSON.parse(e.stdout?.toString() || ''); } catch { console.error(`batch ${i} failed: ${String(e.stderr || e).slice(0, 200)}`); lookupFailed += batch.length; continue; }
   }
   const data = res.data || {};
   // Only a per-alias NOT_FOUND error proves absence. Rate limits and other errors leave the repo
@@ -92,7 +93,6 @@ async function lookupPapers(batch) {
   }
   return null;
 }
-let lookupFailed = 0;
 for (let i = 0; i < allPapers.length; i += 100) {
   const batch = allPapers.slice(i, i + 100);
   const rows = await lookupPapers(batch);
