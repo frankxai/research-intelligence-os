@@ -77,6 +77,7 @@ for (let i = 0; i < allRepos.length; i += 40) {
       const canonical = v.nameWithOwner.toLowerCase();
       if (canonical !== r) reg.repos[canonical] = reg.repos[r];
     } else if (notFound.has(`r${k}`)) reg.repos[r] = { status: 'not-found', checked: new Date().toISOString() };
+    else lookupFailed += 1; // neither found nor proven absent (rate limit, partial error): not a verdict
   });
 }
 
