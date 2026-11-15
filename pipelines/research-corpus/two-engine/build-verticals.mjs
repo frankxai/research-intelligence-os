@@ -61,11 +61,13 @@ const papers = (t) => new Set([...t.matchAll(arxivRe)].map((m) => m[1]));
 
 const topics = new Map();
 for (const engine of ENGINES) {
-  const dir = join(here, engine, 'reports');
+  const dir = join(engine === 'perplexity' && process.env.PERPLEXITY_HOME ? process.env.PERPLEXITY_HOME : join(here, engine), 'reports');
   if (!existsSync(dir)) continue;
   for (const f of readdirSync(dir).filter((x) => /^kb-\d+.*\.md$/.test(x) && !x.endsWith('.chat.md'))) {
     const id = f.replace(/\.md$/, '');
     const { fm, body: rawBody } = frontMatter(readFileSync(join(dir, f), 'utf8'));
+    // Perplexity's own pipeline treats under 3000 words or under 20 inline links as an unfinished report.
+    if (engine === 'perplexity' && !(Number(fm.words) >= 3000 && Number(fm.inline_links) >= 20)) continue;
     // Sanitise the whole report before splitting it, so section boundaries are found in the same
     // text that ends up in the dossier (no hidden characters or comments shifting a heading).
     const s = sanitize(rawBody);

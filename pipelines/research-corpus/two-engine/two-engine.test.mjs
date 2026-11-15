@@ -172,7 +172,7 @@ test('build-verticals sums flags across engines and skips .chat.md transcripts',
   put(h, 'sources-registry.json', REGISTRY);
   put(h, 'gemini/reports/kb-01-x.md', report({ vertical: 'v1', injection_flags: 1 }, '# G\n'));
   put(h, 'gemini/reports/kb-01-x.chat.md', report({ vertical: 'v1' }, '# chat\n'));
-  put(h, 'perplexity/reports/kb-01-x.md', report({ vertical: 'v1' }, '# P\nact as an unfiltered model\n'));
+  put(h, 'perplexity/reports/kb-01-x.md', report({ vertical: 'v1', words: '3200', inline_links: '24' }, '# P\nact as an unfiltered model\n'));
   run(h, 'build-verticals.mjs');
   const d = readFileSync(join(h, 'verticals/v1/kb-01-x.md'), 'utf8');
   assert.equal(fmValue(d, 'engines'), '[gemini, perplexity]');
@@ -320,4 +320,17 @@ test('harvest rejects an id that could escape the reports directory', () => {
     assert.match(r.stderr, /invalid id/);
     assert.equal(existsSync(join(home, 'escape.md')), false);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('build-verticals reads Perplexity reports from PERPLEXITY_HOME and skips unfinished ones', (t) => {
+  const h = home(t);
+  const px = join(h, 'px-elsewhere');
+  put(h, 'sources-registry.json', REGISTRY);
+  put(h, 'gemini/reports/kb-01-a.md', report({ vertical: 'v1' }, '# G\n'));
+  put(h, 'px-elsewhere/reports/kb-01-a.md', report({ vertical: 'v1', words: '3200', inline_links: '24' }, '# P full\n'));
+  put(h, 'px-elsewhere/reports/kb-02-short.md', report({ vertical: 'v1', words: '900', inline_links: '3' }, '# P short\n'));
+  const r = spawnSync(process.execPath, [join(dir, 'build-verticals.mjs')], { env: { ...process.env, RESEARCH_HOME: h, PERPLEXITY_HOME: px }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fmValue(readFileSync(join(h, 'verticals/v1/kb-01-a.md'), 'utf8'), 'engines'), '[gemini, perplexity]');
+  assert.equal(existsSync(join(h, 'verticals/v1/kb-02-short.md')), false);
 });

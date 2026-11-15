@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 
 // Private research state lives outside this public repo (RESEARCH_HOME, default ~/.starlight/research).
 const here = process.env.RESEARCH_HOME || join(homedir(), '.starlight', 'research');
-const dirs = process.argv.slice(2).length ? process.argv.slice(2) : [join(here, 'gemini', 'reports'), join(here, 'perplexity', 'reports')];
+const dirs = process.argv.slice(2).length ? process.argv.slice(2) : [join(here, 'gemini', 'reports'), join(process.env.PERPLEXITY_HOME || join(here, 'perplexity'), 'reports')];
 const regPath = join(here, 'sources-registry.json');
 const reg = existsSync(regPath) ? JSON.parse(readFileSync(regPath, 'utf8')) : { repos: {}, papers: {} };
 // Backfill canonical-name aliases for entries recorded before aliases were written.
@@ -22,7 +22,7 @@ for (const [k, e] of Object.entries(reg.repos)) {
 }
 
 const NOT_REPO = new Set(['orgs', 'topics', 'features', 'marketplace', 'sponsors', 'collections', 'settings', 'about', 'pricing', 'enterprise', 'login', 'apps', 'search', 'trending', 'advisories', 'repos', 'users', 'notifications']);
-const repoRe = /(?<![\w.])github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})/g;
+const repoRe = /(?<![\w.])(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})/g;
 const arxivRe = /arxiv\.org\/(?:abs|pdf|html)\/(\d{4}\.\d{4,5})(?:v\d+)?/g;
 
 const reports = [];
