@@ -11,6 +11,9 @@
   "ai_search_namespaces": [{ "binding": "AI_SEARCH", "namespace": "default" }],
   "ai": { "binding": "AI" },
   "r2_buckets": [{ "binding": "CORPUS", "bucket_name": "starlight-research-corpus" }],
+  // Extracted claims for claims_search / claims_get: bge-m3 embeddings (1024-dim, cosine), metadata
+  // indexes on report_id, domain and kind. The AI binding above provides the embedding model.
+  "vectorize": [{ "binding": "CLAIMS", "index_name": "starlight-claims" }],
 
   "vars": {
     "INSTANCE": "starlight-research",
