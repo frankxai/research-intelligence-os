@@ -10,6 +10,8 @@
 
   "ai_search_namespaces": [{ "binding": "AI_SEARCH", "namespace": "default" }],
   "ai": { "binding": "AI" },
+  // Claims index (bge-m3, 1024-dim, cosine; metadata indexes on report_id, domain, kind). The index must exist before deploy.
+  "vectorize": [{ "binding": "CLAIMS", "index_name": "starlight-claims" }],
   "r2_buckets": [{ "binding": "CORPUS", "bucket_name": "starlight-research-corpus" }],
 
   "vars": {
