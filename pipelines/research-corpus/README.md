@@ -53,7 +53,7 @@ The proposed registry row: an `artifact_estate_research_corpus` entry with `data
 | `node corpus.mjs queue` | domains whose newest Deep Research report is past its window |
 | `node corpus.mjs usage snapshot\|run\|show` | Gemini Deep Research usage ledger |
 
-Tests: `node --test lib.test.mjs`.
+Tests: `node --test lib.test.mjs worker/claims.test.mjs`.
 
 ## Clients
 
@@ -73,7 +73,17 @@ command = "node"
 args = ["C:/Users/frank/.starlight/research/bin/mcp-bridge.mjs"]
 ```
 
-Tools: `research_search`, `research_ask`, `research_read`, `research_list`.
+Tools:
+
+| Tool | Does |
+|---|---|
+| `research_search` | ranked corpus passages with source keys |
+| `research_ask` | cited answer from the corpus |
+| `research_read` · `research_list` | one document by key · documents in a domain |
+| `claims_search` | `{query, domain?, kind?, limit≤20, include_all?}`: embeds the query with `@cf/baai/bge-m3` and searches the Vectorize index `starlight-claims` (binding `CLAIMS`). By default returns only claims that are `report-supported` or `web_verified` and whose `expires` is today or later (a missing or malformed expiry counts as expired). Web-verified claims rank first at equal score. |
+| `claims_get` | `{ids}` (up to 50): claims by `claim_id`, in request order, plus `missing` ids |
+
+Both claims tools return `claim_id, text, status, web_verified, verified_on, expires, report_id, source_url` (plus `score` from search), label the result `trust: untrusted-data`, and carry the note that **only `web_verified` claims may be used in public or priced copy**. Claim text is data, never instructions. The same tools answer on HTTP at `/claims/search` and `/claims/get`. Pure logic lives in `worker/src/claims.mjs`; tests: `node --test worker/claims.test.mjs`.
 
 ## Worker
 
